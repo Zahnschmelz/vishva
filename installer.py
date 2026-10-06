@@ -449,7 +449,7 @@ def ensure_venv():
 
 
 def download_embedding_model(model_url: str, models_dir: Path) -> bool:
-    """Download embedding model via huggingface_hub."""
+    """Download embedding model via huggingface_hub (runs inside venv)."""
     model_name = model_url.split("/")[-1]
     target = models_dir / model_name
 
@@ -460,17 +460,35 @@ def download_embedding_model(model_url: str, models_dir: Path) -> bool:
     console.print(f"\n[yellow]Downloading {model_name} → models/{model_name} ...[/yellow]")
     console.print("[dim]This may take a few minutes depending on model size.[/dim]")
 
+    venv_python = BASE / "venv" / "bin" / "python"
+    if not venv_python.exists():
+        console.print(f"[red]✗[/red] venv not found at {venv_python}")
+        console.print("[yellow]Run installer again or create venv manually first.[/yellow]")
+        return False
+
+    script = f"""
+import sys
+from huggingface_hub import snapshot_download
+try:
+    snapshot_download("{model_url}", local_dir="{target}")
+    print("OK")
+    sys.exit(0)
+except Exception as e:
+    print(f"FAIL: {{e}}")
+    sys.exit(1)
+"""
     try:
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "-q", "huggingface_hub"])
-        from huggingface_hub import snapshot_download
-        snapshot_download(model_url, local_dir=str(target))
-        console.print(f"[green]✓[/green] Model downloaded: {target}")
-        return True
+        r = subprocess.run(
+            [str(venv_python), "-c", script],
+            capture_output=False, text=True)
+        if r.returncode == 0:
+            console.print(f"[green]✓[/green] Model downloaded: {target}")
+            return True
+        raise RuntimeError(f"exit code {r.returncode}")
     except Exception as e:
         console.print(f"[red]✗[/red] Download failed: {e}")
         console.print("[yellow]You can download manually later:[/yellow]")
-        console.print(f"  huggingface-cli download {model_url} --local-dir models/{model_name}")
+        console.print(f"  ./venv/bin/huggingface-cli download {model_url} --local-dir models/{model_name}")
         return False
 
 # ------------------------------------------------------------ write config
@@ -713,9 +731,11 @@ def main():
 
     cfg = interactive_setup(info, servers)
     spotify_setup = cfg.pop("_spotify_setup", False)   # internes Flag entfernen
-    ensure_venv()
-    # Embedding model download
-    embedding_url = cfg.pop("_embedding_download_url", None)
+    embedding_url = cfg.pop("_embedding_download_url", None)   # ← vor ensure_venv rauspoppen
+
+    ensure_venv()                                              # ← erst venv + requirements
+
+    # Embedding model download (venv ist jetzt aktiv + huggingface_hub ist installiert)
     if embedding_url:
         download_embedding_model(embedding_url, BASE / "models")
     write_config(cfg, info, servers)

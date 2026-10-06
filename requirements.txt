@@ -2,10 +2,11 @@ requests==2.34.2
 prompt_toolkit==3.0.53
 rich==15.0.0
 tiktoken==0.14.0
+huggingface_hub==0.24.0
 python-telegram-bot[job-queue]==22.8
 spotipy==2.26.0
 Pillow==12.3.0
-torch==2.5.1+cpu
+torch==2.5.1
 sentence-transformers==6.1.0
 numpy==2.5.3
 trafilatura==2.2.0
