@@ -335,8 +335,39 @@ def interactive_setup(info: Dict[str, Any], servers: Dict[str, Dict[str, Any]]) 
     if cfg["rag_enabled"]:
         cfg["rag_meta_enrichment_enabled"] = Confirm.ask("Auto-inject relevant memory?", default=True)
         cfg["rag_meta_extraction_enabled"] = Confirm.ask("Auto-extract from turns?", default=True)
-    cfg["rag_top_k"] = IntPrompt.ask(
-        "RAG results to inject", default=3, choices=["1", "2", "3", "5"])
+        cfg["rag_top_k"] = IntPrompt.ask("RAG results to inject", default=3, choices=["1", "2", "3", "5"])
+
+        # --- Embedding Model ---
+        console.print("\n[yellow]Embedding Model (for RAG)[/yellow]")
+        models_dir = BASE / "models"
+        models_dir.mkdir(parents=True, exist_ok=True)
+
+        existing_models = sorted([
+            d.name for d in models_dir.iterdir()
+            if d.is_dir() and any(d.iterdir())
+        ])
+
+        if existing_models:
+            console.print(f"  Found: {', '.join(existing_models)}")
+            cfg["rag_embedding_model"] = Prompt.ask(
+                "Embedding model to use",
+                default=existing_models[0])
+        else:
+            console.print("  No models found in models/")
+            if Confirm.ask("Download an embedding model now?", default=True):
+                model_choice = Prompt.ask(
+                    "Model",
+                    choices=["multilingual-e5-large-instruct", "all-MiniLM-L6-v2"],
+                    default="multilingual-e5-large-instruct")
+                model_map = {
+                    "multilingual-e5-large-instruct": "intfloat/multilingual-e5-large-instruct",
+                    "all-MiniLM-L6-v2": "sentence-transformers/all-MiniLM-L6-v2",
+                }
+                cfg["_embedding_download_url"] = model_map[model_choice]
+                cfg["rag_embedding_model"] = model_choice
+            else:
+                cfg["rag_embedding_model"] = Prompt.ask(
+                    "Model name (leave empty to configure later)", default="")
 
     # --- TTS ---
     console.print("\n[yellow]TTS[/yellow]")
@@ -417,6 +448,31 @@ def ensure_venv():
         console.print("[green]✓[/green] requirements installed")
 
 
+def download_embedding_model(model_url: str, models_dir: Path) -> bool:
+    """Download embedding model via huggingface_hub."""
+    model_name = model_url.split("/")[-1]
+    target = models_dir / model_name
+
+    if target.exists() and any(target.iterdir()):
+        console.print(f"[green]✓[/green] Model already exists: {target}")
+        return True
+
+    console.print(f"\n[yellow]Downloading {model_name} → models/{model_name} ...[/yellow]")
+    console.print("[dim]This may take a few minutes depending on model size.[/dim]")
+
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "-q", "huggingface_hub"])
+        from huggingface_hub import snapshot_download
+        snapshot_download(model_url, local_dir=str(target))
+        console.print(f"[green]✓[/green] Model downloaded: {target}")
+        return True
+    except Exception as e:
+        console.print(f"[red]✗[/red] Download failed: {e}")
+        console.print("[yellow]You can download manually later:[/yellow]")
+        console.print(f"  huggingface-cli download {model_url} --local-dir models/{model_name}")
+        return False
+
 # ------------------------------------------------------------ write config
 def write_config(cfg: Dict[str, Any], info: Dict[str, Any],
                  servers: Dict[str, Any]):
@@ -451,6 +507,7 @@ def write_config(cfg: Dict[str, Any], info: Dict[str, Any],
         "context_size", "compression_threshold", "language", "debug",
         "rag_enabled", "rag_top_k",
         "rag_meta_enrichment_enabled", "rag_meta_extraction_enabled",
+        "rag_embedding_model",                                          # ← NEU
         "tts_enabled", "tts_server_url", "tts_voice",
         "bot_token", "chat_id",
         "spotify_client_id", "spotify_client_secret", "spotify_redirect_uri",
@@ -657,6 +714,10 @@ def main():
     cfg = interactive_setup(info, servers)
     spotify_setup = cfg.pop("_spotify_setup", False)   # internes Flag entfernen
     ensure_venv()
+    # Embedding model download
+    embedding_url = cfg.pop("_embedding_download_url", None)
+    if embedding_url:
+        download_embedding_model(embedding_url, BASE / "models")
     write_config(cfg, info, servers)
     write_service_files(info)
 
