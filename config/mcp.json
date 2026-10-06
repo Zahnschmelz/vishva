@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "pycode": {
+      "command": "./venv/bin/python",
+      "args": ["./mcp/server.py"],
+      "env": {
+        "VISHVA_MCP_WORKDIR": "/path/to/vishva/working_dir"
+      }
+    }
+  }
+}

@@ -1,0 +1,269 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "bash",
+      "description": "Run shell command. 120s timeout.",
+      "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "bg_task",
+      "description": "Run/manage background commands as transient systemd services (auto-removed after exit). Reports running/failed/completed after brief delay. restart re-runs a task (e.g. after reboot).",
+      "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["start", "status", "list", "stop", "restart", "clean"]}, "command": {"type": "string"}, "task_id": {"type": "string"}, "description": {"type": "string"}, "restart_on_failure": {"type": "boolean"}}, "required": ["action"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_file",
+      "description": "Read file content.",
+      "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "write_file",
+      "description": "Create or overwrite file with code. Code belongs here, not in chat answers. Syntax-checked (skip_validation bypasses).",
+      "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}, "skip_validation": {"type": "boolean"}}, "required": ["path", "content"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "edit_file",
+      "description": "Replace old_string with new_string in file.",
+      "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old_string": {"type": "string"}, "new_string": {"type": "string"}, "skip_validation": {"type": "boolean"}}, "required": ["path", "old_string", "new_string"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_dir",
+      "description": "List dir, paginated, maxdepth 1-3.",
+      "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "maxdepth": {"type": "integer"}, "max_entries": {"type": "integer"}, "show_hidden": {"type": "boolean"}}, "required": ["path"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "lint_code",
+      "description": "Check code syntax (python/json/bash/js). No writes.",
+      "parameters": {"type": "object", "properties": {"content": {"type": "string"}, "path": {"type": "string"}, "lang": {"type": "string", "enum": ["python", "json", "bash", "javascript", "auto"]}}, "required": ["content"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_cache",
+      "description": "Read offloaded tool result. Big results: read chunk by chunk.",
+      "parameters": {"type": "object", "properties": {
+          "path": {"type": "string", "description": "agent_cache/<sid>/<tcid>.json"},
+          "chunk": {"type": "integer", "description": "Chunk index 0..N-1 for big results"}
+      }, "required": ["path"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "web_read",
+      "description": "Read webpage",
+      "parameters": {"type": "object", "properties": {"url": {"type": "string"}, "wait_for": {"type": "string"}, "max_chars": {"type": "integer"}, "cache_fallback": {"type": "boolean"}}, "required": ["url"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "web_search",
+      "description": "Web search.",
+      "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "max_results": {"type": "integer"}}, "required": ["query"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "product_search",
+      "description": "Search for products on price comparison sites. Returns price comparison, title, price, URL, merchant.",
+      "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "sources": {"type": "string"}, "max_results": {"type": "integer"}}, "required": ["query"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "news_digest",
+      "description": "News digest.",
+      "parameters": {"type": "object", "properties": {"topics": {"type": "array", "items": {"type": "string"}}}, "required": ["topics"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "weather",
+      "description": "Weather forecast.",
+      "parameters": {"type": "object", "properties": {"period": {"type": "string", "enum": ["today", "tomorrow", "week"]}}, "required": ["period"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "spotify",
+      "description": "Spotify playback (play needs query).",
+      "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["play", "stop"]}, "query": {"type": "string"}}, "required": ["action"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "speak",
+      "description": "TTS: speak text aloud.",
+      "parameters": {"type": "object", "properties": {"speech": {"type": "string"}}, "required": ["speech"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "sched_task",
+      "description": "Schedule task for later.",
+      "parameters": {"type": "object", "properties": {"trigger_time": {"type": "string", "description": "YYYY-MM-DD HH:MM:SS"},  "prompt": {"type": "string"}}, "required": ["trigger_time", "prompt"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "ls_tasks",
+      "description": "List scheduled tasks.",
+      "parameters": {"type": "object", "properties": {}, "required": []}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "cancel_task",
+      "description": "Cancel scheduled task.",
+      "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "sys_update",
+      "description": "System update.",
+      "parameters": {"type": "object", "properties": {}, "required": []}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "sys_clean",
+      "description": "clean packages cache.",
+      "parameters": {"type": "object", "properties": {}, "required": []}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "vol_ctl",
+      "description": "System volume.",
+      "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["vol_up", "vol_down", "vol_percent"]}, "percent": {"type": "integer"}}, "required": ["action"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "brightness_ctl",
+      "description": "Screen brightness.",
+      "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["up", "down", "percent"]}, "value": {"type": "integer"}}, "required": ["action"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "turnoff_screen",
+      "description": "Turn screen off.",
+      "parameters": {"type": "object", "properties": {}, "required": []}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "subagent",
+      "description": "Spawn subagent for isolated task.",
+      "parameters": {"type": "object", "properties": {"task": {"type": "string"}, "max_turns": {"type": "integer"}}, "required": ["task"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "rag_search",
+      "description": "Search knowledge base.",
+      "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "top_k": {"type": "integer"}}, "required": ["query"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "rag_save",
+      "description": "Save Knowledge (RAG); priorities:(0=no, 1=low, 2=mid, 3=high).",
+      "parameters": {"type": "object", "properties": {"text": {"type": "string"}, "category": {"type": "string", "enum": ["user_info", "preference", "system", "agent", "knowhow", "project", "miscellaneous"]},"priority": {"type": "integer", "minimum": 0, "maximum": 3},"source": {"type": "string"}},"required": ["text"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "rag_reindex",
+      "description": "Reindex knowledge/ folder into RAG.",
+      "parameters": {"type": "object", "properties": {}, "required": []}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "rag_delete",
+      "description": "Delete RAG entries by id or source prefix.",
+      "parameters": {"type": "object", "properties": {"id": {"type": "string"}, "source": {"type": "string"}}, "required": []}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "rag_essential",
+      "description": "Create an ESSENTIAL long-term memory entry (auto-injected into every future prompt). ONLY works during first-run setup, max 3 total.",
+      "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "rag_update",
+      "description": "Update/correct an existing RAG entry (e.g. fix a misspelled name). Find the entry by 'id' or 'query', then set new text/category/priority. Re-embeds automatically.",
+      "parameters": {"type": "object", "properties": {"id": {"type": "string"}, "query": {"type": "string"}, "text": {"type": "string"}, "category": {"type": "string"}, "priority": {"type": "integer", "minimum": 0, "maximum": 3}}, "required": []}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "send_image",
+      "description": "Send image to user (Telegram).",
+      "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "caption": {"type": "string"}}, "required": ["path"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "send_file",
+      "description": "Send file to user (Telegram).",
+      "parameters": {"type": "object", "properties": {"file_path": {"type": "string"}}, "required": ["file_path"]}
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "cd",
+      "description": "Change persistent working dir (affects bash + relative paths). No arg: show cwd.",
+      "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": []}
+    }
+  }
+]

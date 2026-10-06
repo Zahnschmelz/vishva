@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Vishva
+Comment=Lokaler AI-Agent (CLI)
+Exec=../run.sh
+Icon=../assets/vishva.svg
+Terminal=true
+Categories=Utility;AI;

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Vishva GUI
+Comment=Lokaler AI-Agent (GUI)
+Exec=run_gui.sh
+Icon=vishva_gui.svg
+Terminal=false
+Categories=Utility;AI;

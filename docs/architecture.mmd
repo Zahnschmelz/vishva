@@ -1,0 +1,64 @@
+graph TB
+    subgraph User Interfaces
+        CLI["CLI agent.py"]
+        GUI["GUI gui.py"]
+        TG["Telegram Bot bot.py"]
+    end
+
+    subgraph Core
+        Agent["AgentCore agent.py"]
+        SM["SessionManager session_manager.py"]
+        TM["ToolManager tool_manager.py"]
+    end
+
+    subgraph Memory
+        Sessions["Sessions data/sessions/"]
+        Cache["Agent Cache data/agent_cache/"]
+        RAG["RAG Manager rag_manager.py"]
+        RAGDB["(RAG DB data/rag_db/)"]
+    end
+
+    subgraph Tools
+        Tools30["30+ Tools vishva/tools/"]
+        MCP["MCP Client mcp_client.py"]
+        MCPServer["MCP Server mcp/server.py"]
+    end
+
+    subgraph Background
+        BgTasks["Background Tasks background_tasks.py"]
+        Scheduler["Scheduler scheduler.py"]
+        Daemon["Scheduler Daemon scheduler_daemon.py"]
+    end
+
+    subgraph External
+        LLM["Main LLM llama-server :8080"]
+        Meta["Meta Model llama-server :8090"]
+        Vision["Vision Model multimodal"]
+        TTS["TTS Server Kokoro :8091"]
+    end
+
+    CLI --> Agent
+    GUI --> Agent
+    TG --> Agent
+
+    Agent --> SM
+    Agent --> TM
+    Agent --> RAG
+
+    SM --> Sessions
+    SM --> Cache
+
+    RAG --> RAGDB
+    RAG --> Meta
+
+    TM --> Tools30
+    TM --> MCP
+    MCP --> MCPServer
+
+    Agent --> LLM
+    Agent --> Vision
+    Agent --> TTS
+
+    BgTasks -.-> Agent
+    Scheduler -.-> Agent
+    Daemon -.-> Scheduler

@@ -1,0 +1,243 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   viewBox="0 0 512 512"
+   width="512"
+   height="512"
+   version="1.1"
+   id="svg24"
+   sodipodi:docname="vishva_gui.svg"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <defs
+     id="defs24" />
+  <sodipodi:namedview
+     id="namedview24"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1">
+    <inkscape:page
+       x="0"
+       y="0"
+       width="512"
+       height="512"
+       id="page2"
+       margin="0"
+       bleed="0" />
+  </sodipodi:namedview>
+  <title
+     id="title1">Vishva – Tool Chakra</title>
+  <!-- Hintergrund (für Transparenz einfach löschen) -->
+  <rect
+     x="0"
+     y="0"
+     width="512"
+     height="512"
+     fill="#0e1b2c"
+     id="rect1"
+     style="display:inline" />
+  <!-- Orbit-Ring -->
+  <g
+     id="ring"
+     transform="matrix(1.2347167,0,0,1.2097957,-56.547337,-51.903884)">
+    <circle
+       cx="256"
+       cy="256"
+       r="185"
+       fill="none"
+       stroke="#8a94a6"
+       stroke-width="3"
+       id="circle1" />
+  </g>
+  <!-- Stern + Kern -->
+  <g
+     id="star"
+     fill="none"
+     stroke="#2fbf71"
+     stroke-width="5"
+     stroke-linejoin="round"
+     transform="matrix(1.2347167,0,0,1.2097957,-56.547337,-51.903884)">
+    <path
+       d="M 256,146 267.6,212.5 311,160.7 287.8,224.2 351.3,201 299.5,244.4 366,256 299.5,267.6 351.3,311 287.8,287.8 311,351.3 267.6,299.5 256,366 244.4,299.5 201,351.3 224.2,287.8 160.7,311 212.5,267.6 146,256 212.5,244.4 160.7,201 l 63.5,23.2 -23.2,-63.5 43.4,51.8 z"
+       id="path1" />
+  </g>
+  <g
+     id="core"
+     transform="matrix(1.2347167,0,0,1.2097957,-56.547337,-51.903884)">
+    <circle
+       cx="256"
+       cy="256"
+       r="40"
+       fill="#f5822a"
+       id="circle2" />
+  </g>
+  <!-- Tool-Glyphen auf dem Ring -->
+  <g
+     id="glyphs"
+     fill="none"
+     stroke="#2fbf71"
+     stroke-width="4"
+     stroke-linecap="round"
+     stroke-linejoin="round"
+     transform="matrix(1.2347167,0,0,1.2097957,-56.547337,-51.903884)">
+    <!-- oben: Zahnrad -->
+    <circle
+       cx="256"
+       cy="71"
+       r="10"
+       id="circle3" />
+    <circle
+       cx="256"
+       cy="71"
+       r="3"
+       stroke-width="3"
+       id="circle4" />
+    <g
+       stroke-width="4"
+       id="g11">
+      <path
+         d="m 256,55 v 6"
+         id="path4" />
+      <path
+         d="m 256,55 v 6"
+         transform="rotate(45,256,71)"
+         id="path5" />
+      <path
+         d="m 256,55 v 6"
+         transform="rotate(90,256,71)"
+         id="path6" />
+      <path
+         d="m 256,55 v 6"
+         transform="rotate(135,256,71)"
+         id="path7" />
+      <path
+         d="m 256,55 v 6"
+         transform="rotate(180,256,71)"
+         id="path8" />
+      <path
+         d="m 256,55 v 6"
+         transform="rotate(-135,256,71)"
+         id="path9" />
+      <path
+         d="m 256,55 v 6"
+         transform="rotate(-90,256,71)"
+         id="path10" />
+      <path
+         d="m 256,55 v 6"
+         transform="rotate(-45,256,71)"
+         id="path11" />
+    </g>
+    <!-- 45°: Dokument -->
+    <rect
+       x="374"
+       y="107"
+       width="26"
+       height="34"
+       rx="3"
+       id="rect11" />
+    <path
+       d="m 392,107 8,8"
+       stroke-width="3"
+       id="path12" />
+    <g
+       stroke-width="3"
+       id="g13">
+      <path
+         d="m 379,121 h 14 m -14,7 h 14 m -14,7 h 10"
+         id="path13" />
+    </g>
+    <!-- 90°: Blitz -->
+    <path
+       d="m 445,236 -14,22 h 10 l -6,20 16,-24 h -10 z"
+       id="path14" />
+    <!-- 135°: Kalender -->
+    <rect
+       x="372"
+       y="372"
+       width="30"
+       height="28"
+       rx="3"
+       id="rect14" />
+    <path
+       d="m 372,381 h 30"
+       stroke-width="3"
+       id="path15" />
+    <path
+       d="m 379,368 v 8 m 16,-8 v 8"
+       stroke-width="3"
+       id="path16" />
+    <g
+       stroke-width="3"
+       id="g17">
+      <path
+         d="m 378,389 h 4 m 4,0 h 4 m 4,0 h 4 m -20,6 h 4 m 4,0 h 4"
+         id="path17" />
+    </g>
+    <!-- 180°: Waveform -->
+    <g
+       stroke-width="4"
+       id="g18">
+      <path
+         d="m 238,436 v 10 m 6,-15 v 20 m 6,-17 v 14 m 6,-21 v 28 m 6,-21 v 14 m 6,-17 v 20 m 6,-15 v 10"
+         id="path18" />
+    </g>
+    <!-- 225°: Auge -->
+    <path
+       d="m 105,387 c 7,-10 33,-10 40,0 -7,10 -33,10 -40,0 z"
+       id="path19" />
+    <circle
+       cx="125"
+       cy="387"
+       r="5"
+       stroke-width="3"
+       id="circle19" />
+    <!-- 270°: Globus-Speechbubble -->
+    <circle
+       cx="71"
+       cy="252"
+       r="13"
+       id="circle20" />
+    <ellipse
+       cx="71"
+       cy="252"
+       rx="6"
+       ry="13"
+       stroke-width="3"
+       id="ellipse20" />
+    <path
+       d="M 58,252 H 84"
+       stroke-width="3"
+       id="path20" />
+    <path
+       d="m 63,263 -5,9 12,-6"
+       stroke-width="3"
+       id="path21" />
+    <!-- 315°: Schraubenschlüssel -->
+    <g
+       transform="rotate(-40,125,125)"
+       id="g24">
+      <path
+         d="m 130.5,107.5 a 11,11 0 1 1 -11,0"
+         id="path22" />
+      <path
+         d="M 130.5,107.5 134,99 M 119.5,107.5 116,99"
+         stroke-width="3"
+         id="path23" />
+      <path
+         d="m 125,129 v 22"
+         stroke-width="7"
+         id="path24" />
+      <circle
+         cx="125"
+         cy="156"
+         r="4.5"
+         stroke-width="3"
+         id="circle24" />
+    </g>
+  </g>
+</svg>
