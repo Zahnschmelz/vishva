@@ -62,7 +62,7 @@ RAG (long-term memory) additionally needs a local embedding model — see
 
 ### 2. Install
 
-    git clone <repo-url>
+    git clone https://github.com/Zahnschmelz/vishva.git
     cd vishva
     chmod +x *.sh *.py        # make executable (no sudo — your own files)
     ./installer.py            # system scan + interactive setup + venv + deps
