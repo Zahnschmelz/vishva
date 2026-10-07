@@ -16,6 +16,12 @@
   <a href="docs/TUTORIAL.md">Tutorial</a>
 </p>
 
+> [!WARNING]
+> **Work in Progress** — Vishva is under active development. The core agent,
+> RAG memory, tool system and scheduler are functional, but expect rough edges:
+> incomplete documentation, occasional bugs, and breaking changes between versions.
+> If you find an issue, please [open an issue](../../issues) — feedback is very welcom
+
 Vishva is a modular, locally-running LLM agent built around three core principles:
 
 - **Identity** — persistent personality via `SOUL.md`
@@ -154,6 +160,37 @@ Gemma-4-26B-A4B main + Qwen3.5-4B meta → ~90–100 t/s.
 
 → Full guide with systemd services, Ollama/LM Studio variants and the complete
 reference setup: [docs/BEST_PRACTICES.md](docs/BEST_PRACTICES.md)
+
+## 🚧 Status & Roadmap
+
+Vishva is in active development. Below is a transparent overview of what's
+still rough and what's coming next.
+
+### Known Issues
+
+| Area | Issue | Status |
+|---|---|---|
+| Localization | Some CLI/GUI messages are still in German | 🔧 in progress |
+| Documentation | `CONFIGURATION.md` and `INSTALL.md` are being rewritten to match the current code | 🔧 in progress |
+| GUI | Settings changes require an app restart in some cases | 📋 planned |
+| Vision | No automatic vision model detection — configure `vision_base_url` manually | 📋 planned |
+
+### Roadmap
+
+- [ ] Full English localization of all user-facing strings
+- [ ] Documentation pass: update all docs to match current behavior
+- [ ] Installer: optional embedding model download
+- [ ] Onboarding: save generated personas to a gitignored `personas/custom/` directory
+- [ ] Improve test coverage for tool modules
+- [x] Confirmation layer for destructive tools
+- [x] Scheduler with multi-channel delivery (CLI/GUI/Telegram)
+- [x] MCP support (stdio + HTTP)
+
+### Contributing
+
+Found a bug or have an idea? Please [open an issue](../../issues) first so we
+can discuss it before you invest time in a pull request. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for details (coming soon).
 
 ## 📜 License
 
