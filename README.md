@@ -22,6 +22,8 @@
 > incomplete documentation, occasional bugs, and breaking changes between versions.
 > If you find an issue, please [open an issue](../../issues) — feedback is very welcom
 
+---
+
 Vishva is a modular, locally-running LLM agent built around three core principles:
 
 - **Identity** — persistent personality via `SOUL.md`
