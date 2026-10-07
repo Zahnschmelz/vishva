@@ -192,8 +192,7 @@ still rough and what's coming next.
 ### Contributing
 
 Found a bug or have an idea? Please [open an issue](../../issues) first so we
-can discuss it before you invest time in a pull request. See
-[CONTRIBUTING.md](CONTRIBUTING.md) for details (coming soon).
+can discuss it before you invest time in a pull request.
 
 ## 📜 License
 
