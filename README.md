@@ -17,8 +17,9 @@
 </p>
 
 > [!WARNING]
-> **Work in Progress** — Vishva is under active development. The core agent,
-> RAG memory, tool system and scheduler are functional, but expect rough edges:
+> **Work in Progress** — Vishva is a **personal project in active development**.
+> It works well for the author's daily use, but is under active development. 
+> The core agent, RAG memory, tool system and scheduler are functional, but expect rough edges:
 > incomplete documentation, occasional bugs, and breaking changes between versions.
 > If you find an issue, please [open an issue](../../issues) — feedback is very welcom
 
