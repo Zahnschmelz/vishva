@@ -16,7 +16,7 @@ class SessionManager:
         self.config_path = config_path or p("config", "config.json")
         self.config = self._load_config()
         self.keep_n = self.config.get("history_keep_n", 5)
-        self.tool_ttl_turns = self.config.get("tool_ttl_turns", 5)
+        self.tool_ttl_turns = self.config.get("tool_ttl_turns", 4)
         self.base_url = self.config.get("base_url", "http://localhost:11434/v1")
         self.model = self.config.get("model", "llama3.1")
         self.api_key = self.config.get("api_key", "ollama")
@@ -274,7 +274,7 @@ class SessionManager:
                         new_content.append(item)
                 new_msg["content"] = new_content
             elif isinstance(content, str) and len(content) > 800:
-                new_msg["content"] = content[:800] + " …[truncated for Summary]"
+                new_msg["content"] = content[:800] + " …[gekürzt für Summary]"
             sanitized.append(new_msg)
         return sanitized
 
@@ -609,7 +609,7 @@ class SessionManager:
         return result
 
     def compress_history_pointers(self, session_id: str, history: List[Dict[str, Any]], offload: bool = True) -> List[Dict[str, Any]]:
-        MAX_RESULT = self.config.get("max_tool_result_length", 4000)
+        MAX_RESULT = self.config.get("max_tool_result_length", 500)
         MAX_ARGS = self.config.get("max_tool_args_length", 2000)
         new_history = []
         offload_count = 0

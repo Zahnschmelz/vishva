@@ -2,6 +2,8 @@ import os
 from datetime import datetime
 import sys
 import json
+import random
+import string
 import asyncio
 import subprocess
 import shutil
@@ -14,7 +16,7 @@ import queue
 import threading
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, TypeHandler, ApplicationHandlerStop
-from .agent import AgentCore
+from .agent import AgentCore, LANG_TO_EXT
 import html as html_mod
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackQueryHandler
@@ -213,6 +215,151 @@ async def handle_confirm_reply(chat_id, text) -> bool:
                                   "reason": text.strip() or "user denied"})
         return True
 
+# --- Code-to-File (Telegram) ---
+_pending_code_saves: Dict[str, Dict] = {}
+_code_save_lock = threading.Lock()
+
+
+async def _send_codesave_prompt(chat_id, block, idx, total, state):
+    if not _bot_app:
+        return
+    lines = block["code"].count("\n") + 1
+    lang = block["lang"] or "text"
+    default_name = state["default_name"]
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"💾 Save ({default_name})",
+                              callback_data=f"codesave|y|{chat_id}"),
+         InlineKeyboardButton("✏️ Custom",
+                              callback_data=f"codesave|c|{chat_id}")],
+        [InlineKeyboardButton("❌ No",
+                              callback_data=f"codesave|n|{chat_id}"),
+         InlineKeyboardButton("⏭️ Skip all",
+                              callback_data=f"codesave|s|{chat_id}")],
+    ])
+    try:
+        msg = await _bot_app.bot.send_message(
+            chat_id=chat_id,
+            text=(f"💾 <b>Code-Block {idx}/{total}</b> "
+                  f"({lang}, ~{lines} Zeilen)\nIn Datei speichern?"),
+            reply_markup=keyboard, parse_mode="HTML")
+        state["message_id"] = msg.message_id
+    except Exception as e:
+        print(f"[CodeSave] send failed: {e}")
+
+
+def _finish_codesave(chat_id: str, result):
+    with _code_save_lock:
+        st = _pending_code_saves.get(chat_id)
+        if st:
+            st["result"] = result
+            st["event"].set()
+
+
+async def handle_codesave_callback(update: Update, context) -> bool:
+    """Verarbeitet die Code-Save Inline-Buttons."""
+    query = update.callback_query
+    data = query.data or ""
+    if not data.startswith("codesave|"):
+        return False
+    try:
+        _, choice, chat_id = data.split("|", 2)
+    except ValueError:
+        return False
+    chat_id = str(chat_id)
+    await query.answer()
+
+    with _code_save_lock:
+        state = _pending_code_saves.get(chat_id)
+    if not state:
+        try:
+            await query.edit_message_text("⚠️ Diese Abfrage ist abgelaufen.")
+        except Exception:
+            pass
+        return True
+
+    if choice == "y":
+        _finish_codesave(chat_id, {"save": True,
+                                   "filename": state["default_name"]})
+        try:
+            await query.edit_message_text(
+                f"✅ Wird gespeichert als <code>{state['default_name']}</code>…",
+                parse_mode="HTML")
+        except Exception:
+            pass
+    elif choice == "c":
+        with _code_save_lock:
+            st = _pending_code_saves.get(chat_id)
+            if st:
+                st["stage"] = 2
+        try:
+            await query.edit_message_text(
+                f"✏️ Bitte antworte jetzt mit dem gewünschten Dateinamen "
+                f"(Standard-Extension: <code>{state['ext']}</code>):",
+                parse_mode="HTML")
+        except Exception:
+            pass
+    elif choice == "s":
+        _finish_codesave(chat_id, {"save": False, "skip_all": True})
+        try:
+            await query.edit_message_text("⏭️ Restliche Code-Blöcke übersprungen.")
+        except Exception:
+            pass
+    else:  # n
+        _finish_codesave(chat_id, {"save": False})
+        try:
+            await query.edit_message_text("🗑️ Speichern verworfen.")
+        except Exception:
+            pass
+    return True
+
+
+async def handle_codesave_reply(chat_id: str, text: str) -> bool:
+    """Stage 2: Text-Antwort des Users = Custom-Dateiname."""
+    chat_id = str(chat_id)
+    with _code_save_lock:
+        state = _pending_code_saves.get(chat_id)
+        if not state or state.get("stage") != 2:
+            return False
+    _finish_codesave(chat_id, {"save": True, "filename": text.strip()})
+    return True
+
+
+def _make_code_save_handler(chat_id: str):
+    """Erzeugt den Code-Save-Handler für diesen Chat (läuft im Worker-Thread)."""
+    chat_id = str(chat_id)
+
+    def handler(block: Dict, idx: int, total: int):
+        if _bot_loop is None:
+            return None
+        lang = block["lang"] or "text"
+        ext = LANG_TO_EXT.get(lang, ".txt")
+        default_name = ("snippet_"
+                        + "".join(random.choices(
+                            string.ascii_lowercase + string.digits, k=10))
+                        + ext)
+        ev = threading.Event()
+        state = {"event": ev, "result": None, "stage": 1,
+                 "default_name": default_name, "ext": ext, "message_id": None}
+        with _code_save_lock:
+            _pending_code_saves[chat_id] = state
+        try:
+            asyncio.run_coroutine_threadsafe(
+                _send_codesave_prompt(chat_id, block, idx, total, state),
+                _bot_loop)
+        except Exception:
+            with _code_save_lock:
+                _pending_code_saves.pop(chat_id, None)
+            return None
+
+        done = ev.wait(timeout=300)
+        with _code_save_lock:
+            state = _pending_code_saves.pop(chat_id, {})
+        if not done or state.get("result") is None:
+            return {"save": False}
+        return state["result"]
+
+    return handler
+
 def _format_table_as_pre(text: str) -> str:
     def _replace(m):
         table = m.group(0).strip()
@@ -226,6 +373,7 @@ def _format_table_as_pre(text: str) -> str:
         _replace, text)
 
 def markdown_to_html(text: str) -> str:
+    """Markdown → Telegram HTML. Code-Blöcke werden vor Formatierung geschützt."""
     if not text:
         return ""
 
@@ -241,8 +389,11 @@ def markdown_to_html(text: str) -> str:
             return key
         text = re.sub(pattern, _wrap, text, flags=re.DOTALL)
 
+    # 1) Fenced code blocks: Opening- UND Closing-Fence müssen eigene Zeilen sein.
+    #    Dadurch beenden innere ```-Sequenzen (z.B. text.replace('```', ''))
+    #    den Block NICHT mehr vorzeitig.
     _protect(
-        r"```(\w*)\s*\n(.*?)```",
+        r"(?ms)^[ \t]*```([\w+-]*)[ \t]*\r?\n(.*?)\n?[ \t]*```[ \t]*$",
         lambda m: (
             "<pre><code>"
             + (m.group(2)
@@ -251,6 +402,21 @@ def markdown_to_html(text: str) -> str:
                .replace(">", "&gt;"))
             + "</code></pre>"))
 
+    # 2) Unclosed fence (abgeschnittene Antwort) → Rest trotzdem als Code schützen
+    m_open = re.search(r"(?m)^[ \t]*```([\w+-]*)[ \t]*\r?\n", text)
+    if m_open:
+        key = f"%%PH{counter[0]}%%"
+        counter[0] += 1
+        placeholders[key] = (
+            "<pre><code>"
+            + text[m_open.end():]
+              .replace("&", "&amp;")
+              .replace("<", "&lt;")
+              .replace(">", "&gt;")
+            + "</code></pre>")
+        text = text[:m_open.start()] + key
+
+    # 3) Inline code `...`
     _protect(
         r"`([^`\n]+)`",
         lambda m: (
@@ -261,7 +427,10 @@ def markdown_to_html(text: str) -> str:
                .replace(">", "&gt;"))
             + "</code>"))
 
+    # 4) Tabellen als <pre>
     text = _format_table_as_pre(text)
+
+    # 5) Markdown-Formatierung auf den Rest
     text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
     text = re.sub(r"__(.+?)__", r"<b>\1</b>", text)
     text = re.sub(r"(?<!\*)\*([^*\n]+?)\*(?!\*)", r"<i>\1</i>", text)
@@ -271,6 +440,7 @@ def markdown_to_html(text: str) -> str:
     text = re.sub(r"^#{1,3}\s+(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
     text = re.sub(r"^[-*_]{3,}\s*$", "", text, flags=re.MULTILINE)
 
+    # 6) Geschützte Blöcke zurück einsetzen
     for key, html in placeholders.items():
         text = text.replace(key, html)
 
@@ -319,6 +489,7 @@ def get_agent(chat_id: str) -> AgentCore:
             notifier=notifier,
             telegram_mode=True)
         agent.tool_manager.set_confirm_handler(make_confirm_handler(chat_id))
+        agent.set_code_save_handler(_make_code_save_handler(chat_id))
         agent.tool_manager.scheduler = scheduler
         agent.interface = "telegram"
         agents[chat_id] = agent
@@ -480,6 +651,9 @@ async def cmd_zip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     agent = get_agent(chat_id)
     result = agent.compress_history()
     await update.message.reply_text(result)
+
+async def cmd_shrink(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await cmd_zip(update, context)
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = """<b>Available commands:</b>
@@ -722,10 +896,15 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     chat_id = str(update.effective_chat.id)
-    if await handle_confirm_reply(chat_id, text):
-        return
     agent = get_agent(chat_id)
     q = notification_queues.get(chat_id)
+
+    # Stage-2-Antworten ABFANGEN, bevor "Thinking..." gesendet wird:
+    if await handle_codesave_reply(chat_id, text):
+        return
+    if await handle_confirm_reply(chat_id, text):
+        return
+
     thinking_msg = await update.message.reply_text("🤔 Thinking...")
     stop_event = asyncio.Event()
     sent_ids = set()
@@ -1173,11 +1352,6 @@ async def auth_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_chat.id) != str(allowed):
         raise ApplicationHandlerStop
 
-async def _dbg_callback(update, context):
-    if update.callback_query:
-        print(f"[DBG] Callback angekommen: {update.callback_query.data!r}")
-    return False
-
 def main():
     config_path = p("config", "config.json")
     if not os.path.exists(config_path):
@@ -1198,9 +1372,9 @@ def main():
     .post_shutdown(post_shutdown)
     .build())
     application.bot_data["authorized_chat"] = str(config.get("chat_id", "") or "")
-    application.add_handler(TypeHandler(Update, _dbg_callback), group=-2)
+    application.add_handler(CallbackQueryHandler(handle_codesave_callback, pattern=r"^codesave\|"), group=-2)
+    application.add_handler(CallbackQueryHandler(handle_confirm_callback, pattern=r"^toolconfirm\|"), group=-2)
     application.add_handler(TypeHandler(Update, auth_filter), group=-1)
-    application.add_handler(CallbackQueryHandler(handle_confirm_callback, pattern=r"^toolconfirm\|"), group=0)
     application.add_handler(CommandHandler("new", cmd_new))
     application.add_handler(CommandHandler("session", cmd_session))
     application.add_handler(CommandHandler("clear", cmd_clear))
@@ -1211,7 +1385,7 @@ def main():
     application.add_handler(CommandHandler("offloading", cmd_offloading))
     application.add_handler(CommandHandler("showthinking", cmd_showthinking))
     application.add_handler(CommandHandler("zip", cmd_zip))
-    application.add_handler(CommandHandler("shrink", cmd_zip))
+    application.add_handler(CommandHandler("shrink", cmd_shrink))
     application.add_handler(CommandHandler("image", cmd_image))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("info", cmd_info))

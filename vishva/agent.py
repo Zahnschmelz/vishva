@@ -1,29 +1,32 @@
 import os
-import json
-import asyncio
-import datetime
+import io
 import re
-import subprocess
+import sys
+import time
+import json
+import string
 import shutil
 import base64
-import io
-import time
+import random
+import asyncio
 import requests
+import datetime
 import threading
+import subprocess
+from rich.panel import Panel
+from rich.markup import escape
 from .paths import p, cfg_path
-from .tts_manager import TTSManager as TTSManager
-from typing import Dict, List, Any, Optional, Callable
-from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import Completer, Completion
-from prompt_toolkit.styles import Style
-from prompt_toolkit.formatted_text import HTML
 from rich.console import Console
 from rich.markdown import Markdown
-from rich.markup import escape
-from rich.panel import Panel
 from .tool_manager import ToolManager
+from prompt_toolkit.styles import Style
+from prompt_toolkit import PromptSession
 from .session_manager import SessionManager
+from prompt_toolkit.formatted_text import HTML
+from .tts_manager import TTSManager as TTSManager
+from typing import Dict, List, Any, Optional, Callable
 from .scheduler import TaskScheduler, process_due_tasks
+from prompt_toolkit.completion import Completer, Completion
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
@@ -32,8 +35,27 @@ os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("TQDM_DISABLE", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-CODE_BLOCK_RE = re.compile(r"```(\S*)[ \t]*\n(.*?)\n?```", re.DOTALL)
+CODE_BLOCK_RE = re.compile(
+    r"^[ \t]*```([\w+-]*)[ \t]*\r?\n"
+    r"(.*?)"
+    r"\n?[ \t]*```[ \t]*$",
+    re.DOTALL | re.MULTILINE)
+
+LANG_TO_EXT = {
+    "python": ".py", "py": ".py",
+    "bash": ".sh", "sh": ".sh", "shell": ".sh", "zsh": ".sh",
+    "javascript": ".js", "js": ".js", "node": ".js",
+    "typescript": ".ts", "ts": ".ts",
+    "json": ".json", "jsonl": ".jsonl", "json5": ".json5", "jsonc": ".jsonc",
+    "yaml": ".yaml", "yml": ".yaml", "toml": ".toml", "ini": ".ini",
+    "xml": ".xml", "html": ".html", "css": ".css", "sql": ".sql",
+    "markdown": ".md", "md": ".md", "txt": ".txt", "text": ".txt",
+    "c": ".c", "h": ".h", "cpp": ".cpp", "c++": ".cpp", "java": ".java",
+    "rust": ".rs", "go": ".go", "ruby": ".rb", "php": ".php",
+    "dockerfile": ".dockerfile", "makefile": ".makefile",}
+
 console = Console()
+
 def _play_notification_sound():
     for fname in ("alarm.mp3", "alarm.wav"):
         fpath = p("assets", "sounds", fname)
@@ -59,7 +81,7 @@ class CommandCompleter(Completer):
             '/tokens', '/config', '/voice', '/info', '/zip', '/shrink',
             '/listtools', '/offloading', '/sched',
             '/sound', '/showThinking', '/image', '/help', '/threshold',
-            '/stt', '/personality', '/persona', '/frame']
+            '/stt', '/personality', '/persona', '/frame', '/context']
         for cmd in commands:
             if cmd.startswith(text):
                 yield Completion(cmd, start_position=-len(text))
@@ -88,6 +110,8 @@ class AgentCore:
             exclude_tools=excluded)
         self.tool_manager.agent_ref = self
         self.tool_manager.set_confirm_handler(self._confirm_tool_cli)
+        self._code_save_handler = None
+        self.set_code_save_handler(self._cli_code_save_handler)
         self.rag_manager = None
         if self.config.get("rag_enabled", False):
             try:
@@ -95,7 +119,7 @@ class AgentCore:
                 self.rag_manager = RAGManager(self.config)
                 self.tool_manager.rag_manager = self.rag_manager
             except Exception as e:
-                console.print(f"[yellow]⚠️ RAG deaktiviert: {type(e).__name__}: {e}[/yellow]")
+                console.print(f"[yellow]⚠️ RAG deactivated: {type(e).__name__}: {e}[/yellow]")
         if self.rag_manager and bool(self.config.get("rag_preload_model", True)):
             try:
                 delay = float(self.config.get("rag_preload_delay_seconds", 0) or 0)
@@ -121,6 +145,9 @@ class AgentCore:
         self.engine_raw = self._load_md("ENGINE.md")
         self.system_prompt = self._build_system_prompt()
         self._chat_lock = threading.Lock()
+        self._last_api_messages = None
+        self._last_api_tools = None
+        self._last_api_turn = 0
         if session_id:
             self.session_id = session_id
             if not self.session_manager.load_session(session_id):
@@ -161,7 +188,14 @@ class AgentCore:
             segments.append(("code", m.group(1), m.group(2)))
             last_end = m.end()
         if last_end < len(content):
-            segments.append(("md", content[last_end:]))
+            tail = content[last_end:]
+            m2 = re.search(r"^[ \t]*```([\w+-]*)[ \t]*\r?\n", tail, re.MULTILINE)
+            if m2:
+                if m2.start() > 0:
+                    segments.append(("md", tail[:m2.start()]))
+                segments.append(("code", m2.group(1), tail[m2.end():]))
+            else:
+                segments.append(("md", tail))
         return segments
 
     def _print_answer(self, content: str):
@@ -182,16 +216,357 @@ class AgentCore:
                     continue
                 console.print(code, markup=False, highlight=False, emoji=False, soft_wrap=True)
 
+    def _meta_endpoint(self, task: str = "meta"):
+        key = {
+            "summary": "summary_model",
+            "rescue": "rescue_model",
+            "enrichment": "rag_enrichment_model",
+            "extraction": "rag_extraction_model",
+        }.get(task, "")
+        route = str(self.config.get(key, "meta")).lower() if key else "meta"
+        if route == "main":
+            return (
+                str(self.config.get("base_url", "")).rstrip("/"),
+                self.config.get("model", ""),
+                self.config.get("api_key", "llama"),
+                min(int(self.config.get("api_timeout", 300) or 300),
+                    int(self.config.get("meta_main_timeout", 120))),)
+        return (
+            str(self.config.get("meta_model_url", "")).rstrip("/"),
+            self.config.get("meta_model_name", ""),
+            self.config.get("meta_api_key", self.config.get("api_key", "llama")),
+            int(self.config.get("meta_model_timeout", 45) or 45),)
+
+    def set_code_save_handler(self, fn):
+        self._code_save_handler = fn
+
+    def _extract_code_blocks(self, text: str) -> List[Dict[str, str]]:
+        return [{"lang": (m.group(1) or "text").lower().strip(),
+                 "code": m.group(2)}
+                for m in CODE_BLOCK_RE.finditer(text)]
+
+    def _default_code_filename(self, blocks: List[Dict]) -> str:
+        lang = blocks[0]["lang"] if blocks else "text"
+        ext = LANG_TO_EXT.get(lang, ".txt")
+        rand_str = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
+        return f"snippet_{rand_str}{ext}"
+
+    def _save_code_to_file(self, blocks: List[Dict], filename: str) -> Optional[str]:
+        code_dir = cfg_path(self.config, "code_to_file_dir", "data/code_snippets")
+        os.makedirs(code_dir, exist_ok=True)
+        safe = os.path.basename(filename or "").strip()
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", safe)
+        if not safe:
+            safe = self._default_code_filename(blocks)
+        if not os.path.splitext(safe)[1]:
+            safe += LANG_TO_EXT.get(blocks[0]["lang"], ".txt")
+        base, ext = os.path.splitext(safe)
+        candidate = os.path.join(code_dir, safe)
+        i = 1
+        while os.path.exists(candidate):
+            candidate = os.path.join(code_dir, f"{base}_{i}{ext}")
+            i += 1
+        try:
+            with open(candidate, "w", encoding="utf-8") as f:
+                if len(blocks) == 1:
+                    f.write(blocks[0]["code"])
+                    if not blocks[0]["code"].endswith("\n"):
+                        f.write("\n")
+                else:
+                    for idx, block in enumerate(blocks, 1):
+                        f.write(f"# --- Block {idx} ({block['lang']}) ---\n")
+                        f.write(block["code"])
+                        if not block["code"].endswith("\n"):
+                            f.write("\n")
+                        f.write("\n")
+            return candidate
+        except Exception as e:
+            if self._debug_level() >= 1:
+                print(f"[CodeSave] Write failed: {e}")
+            return None
+
+    def _cli_code_save_handler(self, block: Dict, idx: int, total: int) -> Optional[Dict]:
+        try:
+            if not sys.stdin.isatty():
+                return None
+        except Exception:
+            return None
+        lines = block["code"].count("\n") + 1
+        lang = block["lang"] or "text"
+        default = self._default_code_filename([block])
+        self._pause_spinner()
+        try:
+            print(f"\n💾 Code block {idx}/{total} ({lang}, ~{lines} lines)")
+            print(f"   Default filename: {default}")
+            try:
+                ans = input("   (Y)es / (n)o / (c)ustom / (s)kip all: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                return {"save": False, "skip_all": True}
+            if ans in ("n", "no"):
+                return {"save": False}
+            if ans in ("s", "skip"):
+                return {"save": False, "skip_all": True}
+            if ans in ("c", "custom"):
+                try:
+                    fn = input(f"   Filename [{default}]: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    return {"save": False}
+                return {"save": True, "filename": fn or default}
+            return {"save": True, "filename": default}
+        finally:
+            self._resume_spinner()
+
+    def _maybe_save_code(self, response: str) -> List[str]:
+        if not bool(self.config.get("code_to_file_enabled", False)):
+            return []
+        if not self._code_save_handler:
+            return []
+        blocks = self._extract_code_blocks(response)
+        if not blocks:
+            return []
+        min_lines = int(self.config.get("code_to_file_min_lines", 5) or 5)
+        eligible = [b for b in blocks if b["code"].count("\n") + 1 >= min_lines]
+        if not eligible:
+            return []
+        saved = []
+        for idx, block in enumerate(eligible, 1):
+            try:
+                result = self._code_save_handler(block, idx, len(eligible))
+            except Exception as e:
+                if self._debug_level() >= 1:
+                    print(f"[CodeSave] Handler error: {e}")
+                continue
+            if not result:
+                continue
+            if result.get("skip_all"):
+                break
+            if not result.get("save"):
+                continue
+            filename = result.get("filename") or self._default_code_filename([block])
+            path = self._save_code_to_file([block], filename)
+            if path:
+                entry = {"path": path, "validation": None}
+                if bool(self.config.get("code_to_file_validate", True)):
+                    entry["validation"] = self._validate_code_file(path)
+                    v = entry["validation"]
+                    if v["checked"] and not v["ok"] and self._debug_level() >= 1:
+                        print(f"[CodeSave] ❌ {path}: {v['error']}")
+                saved.append(entry)
+        return saved
+
+    @staticmethod
+    def _repair_args_string(s) -> str:
+        if not isinstance(s, str):
+            s = json.dumps(s, ensure_ascii=False)
+        try:
+            json.loads(s)
+            return s
+        except Exception:
+            pass
+        repaired = s.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
+        try:
+            json.loads(repaired)
+            return repaired
+        except Exception:
+            pass
+        out = []
+        for ch in s:
+            out.append("\\u%04x" % ord(ch) if ord(ch) < 0x20 else ch)
+        repaired2 = "".join(out)
+        try:
+            json.loads(repaired2)
+            return repaired2
+        except Exception:
+            return "{}"
+
+    def _sanitize_history_tool_calls(self, history) -> bool:
+        changed = False
+        for msg in history:
+            tcs = msg.get("tool_calls")
+            if not tcs:
+                continue
+            for tc in tcs:
+                func = tc.get("function", {})
+                args = func.get("arguments", "{}")
+                fixed = self._repair_args_string(args)
+                if fixed != args:
+                    func["arguments"] = fixed
+                    changed = True
+        return changed
+
+    @staticmethod
+    def _strip_tool_history(messages):
+        out = []
+        for msg in messages:
+            if msg.get("role") == "tool":
+                continue
+            m = dict(msg)
+            if m.get("tool_calls"):
+                m.pop("tool_calls", None)
+                content = m.get("content") or ""
+                m["content"] = (content + "\n[tool calls removed]").strip() if content else "[tool calls removed]"
+            out.append(m)
+        return out
+
+    def _validate_code_file(self, path: str) -> Dict[str, Any]:
+        ext = os.path.splitext(path)[1].lower()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception:
+            return {"checked": False, "ok": True, "error": None}
+        if ext == ".py":
+            try:
+                import ast
+                ast.parse(content)
+                return {"checked": True, "ok": True, "error": None}
+            except SyntaxError as e:
+                return {"checked": True, "ok": False,
+                        "error": f"SyntaxError line {e.lineno}: {e.msg}"}
+        if ext == ".sh":
+            try:
+                r = subprocess.run(["bash", "-n", path],
+                                   capture_output=True, text=True, timeout=10)
+                if r.returncode == 0:
+                    return {"checked": True, "ok": True, "error": None}
+                return {"checked": True, "ok": False,
+                        "error": (r.stderr or "").strip()[:500]}
+            except Exception as e:
+                return {"checked": False, "ok": True, "error": None}
+        if ext == ".json":
+            try:
+                json.loads(content)
+                return {"checked": True, "ok": True, "error": None}
+            except Exception as e:
+                return {"checked": True, "ok": False, "error": str(e)[:500]}
+        if ext == ".jsonl":
+            for i, line in enumerate(content.splitlines(), 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    json.loads(line)
+                except Exception as e:
+                    return {"checked": True, "ok": False,
+                            "error": f"Line {i}: {str(e)[:300]}"}
+            return {"checked": True, "ok": True, "error": None}
+        if ext in (".yaml", ".yml"):
+            try:
+                import yaml
+            except ImportError:
+                return {"checked": False, "ok": True, "error": None}
+            try:
+                yaml.safe_load(content)
+                return {"checked": True, "ok": True, "error": None}
+            except Exception as e:
+                return {"checked": True, "ok": False, "error": str(e)[:500]}
+        if ext == ".js" and shutil.which("node"):
+            try:
+                r = subprocess.run(["node", "--check", path],
+                                   capture_output=True, text=True, timeout=10)
+                if r.returncode == 0:
+                    return {"checked": True, "ok": True, "error": None}
+                return {"checked": True, "ok": False,
+                        "error": (r.stderr or "").strip()[:500]}
+            except Exception:
+                return {"checked": False, "ok": True, "error": None}
+        return {"checked": False, "ok": True, "error": None}
+
+    def _build_code_fix_prompt(self, failed: List[Dict[str, Any]]) -> str:
+        parts = []
+        for entry in failed:
+            path = entry["path"]
+            err = entry["validation"]["error"]
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    content = f.read()[:4000]
+            except Exception:
+                content = "(nicht lesbar)"
+            parts.append(
+                f"### File: {path}\n"
+                f"Check-Error: {err}\n"
+                f"Current content:\n```\n{content}\n```")
+        return (
+            "AUTO-FIX: The following saved code file(s) FAILED the syntax check.\n"
+            "Analyze the error, fix the code, and write the corrected version "
+            "back to the SAME path using write_file.\n"
+            "Do not explain at length — just fix and save.\n\n"
+            + "\n\n".join(parts))
+
+    def _seed_bounds(self):
+        try:
+            bits = int(self.config.get("seed_bits", 64))
+        except (TypeError, ValueError):
+            bits = 64
+        if bits not in (32, 64):
+            bits = 64
+        lo = -(2 ** (bits - 1))
+        hi = 2 ** (bits - 1) - 1
+        return lo, hi
+
+    def _new_seed(self) -> int:
+        lo, hi = self._seed_bounds()
+        return random.randint(lo, hi)
+
+    def _read_or_create_seed_file(self, path: str) -> int:
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    return int(f.read().strip())
+        except Exception:
+            pass
+        seed = self._new_seed()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(str(seed))
+        except Exception:
+            pass
+        return seed
+
+    def _get_seed(self) -> int:
+        mode = str(self.config.get("seed_mode", "random")).lower()
+        if mode == "fixed":
+            return self._read_or_create_seed_file(p("data", ".seed"))
+        if mode == "session":
+            sid = self.get_session_id() or "default"
+            return self._read_or_create_seed_file(p("data", f".{sid}.seed"))
+        return self._new_seed()
+
+    def reroll_seed(self) -> int:
+        mode = str(self.config.get("seed_mode", "random")).lower()
+        if mode == "fixed":
+            path = p("data", ".seed")
+        elif mode == "session":
+            sid = self.get_session_id() or "default"
+            path = p("data", f".{sid}.seed")
+        else:
+            return self._new_seed()
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            pass
+        return self._read_or_create_seed_file(path)
+
     def _bg_rag_extract(self, user_message, assistant_answer, prev_user_msg, prev_asst_msg):
         try:
+            ex_cfg = self.config
+            if str(self.config.get("rag_extraction_model", "meta")).lower() == "main":
+                ex_cfg = dict(self.config)
+                ex_cfg["meta_model_url"] = self.config.get("base_url")
+                ex_cfg["meta_model_name"] = self.config.get("model")
+                ex_cfg["meta_api_key"] = self.config.get("api_key")
+                ex_cfg["meta_model_timeout"] = min(
+                    int(self.config.get("api_timeout", 300) or 300), 120)
             saved = self.rag_manager.extract_from_turn(
                 prev_user_msg=prev_user_msg,
                 prev_asst_msg=prev_asst_msg,
                 user_message=user_message,
                 assistant_answer=assistant_answer,
-                config=self.config)
+                config=ex_cfg)
             if saved and self.notifier:
-                self.notifier(f"🧠 Extraction{'e' if saved != 1 else ''}")
+                self.notifier(f"🧠 Extraction{'e' if saved != 1 else ''})")
         except Exception as e:
             if self.config.get("debug", 0) >= 1:
                 console.print(f"[dim red]RAG-PostExtract-Fehler: {e}[/dim red]")
@@ -349,16 +724,11 @@ class AgentCore:
             return None
 
     def _sampling_params(self) -> Dict[str, Any]:
-        params: Dict[str, Any] = {}
-        if self.config.get("temperature") is not None:
-            params["temperature"] = float(self.config["temperature"])
-        if self.config.get("top_p") is not None:
-            params["top_p"] = float(self.config["top_p"])
-        if self.config.get("top_k") is not None:
-            params["top_k"] = int(self.config["top_k"])
-        if self.config.get("seed") is not None:
-            params["seed"] = int(self.config["seed"])
-        return params
+        return {
+            "temperature": self.config.get("temperature", 0.9),
+            "top_p": self.config.get("top_p", 0.95),
+            "top_k": self.config.get("top_k", 64),
+            "seed": self._get_seed(),}
 
     def _get_api_endpoints(self, wants_image: bool = False):
         base_url = self.base_url
@@ -410,16 +780,30 @@ class AgentCore:
             payload["tool_choice"] = "auto"
         timeout = self.config.get("api_timeout", 1200)
         retry_delay = float(self.config.get("api_retry_delay", 1.5))
-        max_attempts = 2
-
+        max_attempts = int(self.config.get("api_max_retries", 1))
+        last_error = None
+        last_body = ""
         for attempt in range(max_attempts):
             try:
+                if attempt > 0 and self._debug_level() >= 1:
+                    console.print(f"[dim cyan]🔄 Retry attempt {attempt + 1}/{max_attempts}...[/dim cyan]")
                 response = requests.post(
                     f"{base_url}/chat/completions",
                     headers=headers,
                     json=payload,
                     timeout=timeout)
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    body_msg = ""
+                    try:
+                        body_msg = str(response.json().get("error", {}).get("message", ""))
+                    except Exception:
+                        body_msg = (response.text or "")[:300]
+                    err = requests.exceptions.HTTPError(
+                        f"{response.status_code} Server Error: "
+                        f"{body_msg[:200] or response.reason}",
+                        response=response)
+                    err.vishva_body = body_msg
+                    raise err
                 data = response.json()
                 choice = data.get("choices", [{}])[0]
                 msg = choice.get("message", {})
@@ -427,17 +811,67 @@ class AgentCore:
                 if reasoning:
                     data["_extracted_reasoning"] = reasoning
                 return data
-            except requests.exceptions.RequestException as e:
+            except (requests.exceptions.RequestException,
+                    requests.exceptions.HTTPError,
+                    requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout) as e:
+                last_error = e
+                last_body = getattr(e, "vishva_body", "") or ""
                 if attempt < max_attempts - 1:
                     if self._debug_level() >= 1:
-                        console.print(f"[dim yellow]⚠️ API-Call fehlgeschlagen (attempt {attempt + 1}/{max_attempts}), retry in {retry_delay}s: {e}[/dim yellow]")
+                        console.print(
+                            f"[dim yellow]⚠️ API-Call failed "
+                            f"(attempt {attempt + 1}/{max_attempts}), "
+                            f"retry in {retry_delay}s: {e}[/dim yellow]")
                     time.sleep(retry_delay)
                     continue
-                return {"error": str(e)}
+                break
+            except Exception as e:
+                if self._debug_level() >= 1:
+                    console.print(f"[red]❌ Unexpected error (no retry): {type(e).__name__}: {e}[/red]")
+                return {"error": f"{type(e).__name__}: {str(e)}",
+                        "error_body": "",
+                        "error_kind": "other"}
+        body = last_body or ""
+        kind = ("tool_parse"
+                if ("parse tool call arguments" in body
+                    or "parse_error.101" in body)
+                else "other")
+        return {"error": str(last_error) if last_error else "Unknown error",
+                "error_body": body[:300],
+                "error_kind": kind}
 
     def chat(self, user_message: str, image_b64: Optional[str] = None) -> str:
         with self._chat_lock:
-            return self._chat_impl(user_message, image_b64)
+            response = self._chat_impl(user_message, image_b64)
+        if not getattr(self, "_code_fix_active", False):
+            saved = self._maybe_save_code(response)
+            if saved:
+                lines = []
+                for s in saved:
+                    line = f"💾 Code saved to: `{s['path']}`"
+                    v = s.get("validation")
+                    if v and v.get("checked"):
+                        if v["ok"]:
+                            line += " ✅ syntax OK"
+                        else:
+                            line += f" ⚠️ syntax error: {v['error']}"
+                    lines.append(line)
+                response += "\n\n" + "\n".join(lines)
+                failed = [s for s in saved
+                          if s.get("validation")
+                          and s["validation"].get("checked")
+                          and not s["validation"].get("ok")]
+                if failed and bool(self.config.get("code_to_file_autofix", False)):
+                    self._code_fix_active = True
+                    try:
+                        fix_response = self.chat(self._build_code_fix_prompt(failed))
+                        response += "\n\n🔧 [Auto-Fix] " + str(fix_response)[:2000]
+                    except Exception as e:
+                        response += f"\n\n⚠️ Auto-Fix failed: {e}"
+                    finally:
+                        self._code_fix_active = False
+        return response
 
     @staticmethod
     def _arg_is_path_like(key: str, value: Any) -> bool:
@@ -478,6 +912,8 @@ class AgentCore:
 
     def _chat_impl(self, user_message: str, image_b64: Optional[str] = None) -> str:
         history = self.session_manager.load_session(self.session_id)
+        if self._sanitize_history_tool_calls(history):
+            self.session_manager.save_session(self.session_id, history)
         if history and history[0].get("role") == "system":
             history[0]["content"] = self.system_prompt
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -510,8 +946,16 @@ class AgentCore:
                         prev_asst_msg = raw
                     if prev_user_msg and prev_asst_msg:
                         break
+                enrich_cfg = self.config
+                if str(self.config.get("rag_enrichment_model", "meta")).lower() == "main":
+                    enrich_cfg = dict(self.config)
+                    enrich_cfg["meta_model_url"] = self.config.get("base_url")
+                    enrich_cfg["meta_model_name"] = self.config.get("model")
+                    enrich_cfg["meta_api_key"] = self.config.get("api_key")
+                    enrich_cfg["meta_model_timeout"] = min(
+                        int(self.config.get("api_timeout", 300) or 300), 120)
                 enrichment_ctx = self.rag_manager.enrich_context(
-                    user_message, self.config,
+                    user_message, enrich_cfg,
                     prev_user_msg=prev_user_msg,
                     prev_asst_msg=prev_asst_msg) or ""
                 if enrichment_ctx:
@@ -525,7 +969,7 @@ class AgentCore:
                     rag_ctx = essential_ctx
             except Exception as e:
                 if self.config.get("debug", 0) >= 1:
-                    console.print(f"[dim red]RAG-Enrichment-Fehler: {e}[/dim red]")
+                    console.print(f"[dim red]RAG-Enrichment-Failure: {e}[/dim red]")
         ephemeral_parts = []
         if dyn_block:
             ephemeral_parts.append(dyn_block)
@@ -547,24 +991,25 @@ class AgentCore:
         vision_active = bool(image_b64)
         api_base, api_model, api_key = self._get_api_endpoints(vision_active)
         tools = self.tool_manager.get_active_tools()
-        if vision_active and bool(self.config.get("vision_disable_tools", True)):
+        if vision_active:
             tools = []
         api_messages = list(history)
         api_messages = self._inject_ephemeral_context(api_messages, ephemeral_suffix)
         session_tokens = self.session_manager.get_total_tokens(
             self.session_id, self.system_prompt, tools, override_history=api_messages)
         if session_tokens > self.compression_threshold:
-            console.print(f"[dim yellow]⚠️  Session-Tokens ({session_tokens}) > Threshold ({self.compression_threshold}). auto-compression...[/dim yellow]")
+            console.print(f"[dim yellow]⚠️  Session-Tokens ({session_tokens}) > Threshold ({self.compression_threshold}). Auto-Compression...[/dim yellow]")
             result = self.compress_history()
             console.print(f"[dim]{result}[/dim]")
             history = self.session_manager.load_session(self.session_id)
         max_tool_turns = self.config.get("max_tool_turns", 15)
         tool_turns = 0
         rescue_attempts = 0
+        tool_parse_retries = 0
         while True:
             if tool_turns >= max_tool_turns:
                 warning = (
-                    f"⚠️ Stop after {tool_turns} tool passes{'n' if tool_turns != 1 else ''} "
+                    f"⚠️ Termination after {tool_turns} Tool-Turn{'n' if tool_turns != 1 else ''} "
                     f"(Limit: {max_tool_turns}) – the model wanted additional tools "
                     "Execute (possible loop). Refine the query or start /new.")
                 history.append({"role": "assistant", "content": warning})
@@ -573,7 +1018,7 @@ class AgentCore:
             api_messages = list(history)
             api_messages = self._inject_ephemeral_context(api_messages, ephemeral_suffix)
             tools = self.tool_manager.get_active_tools()
-            if vision_active and bool(self.config.get("vision_disable_tools", True)):
+            if vision_active:
                 tools = []
             tokens_now = 0
             if tool_turns >= 1 or self.config.get("budget_hint_enabled", True) \
@@ -601,6 +1046,9 @@ class AgentCore:
             tool_turns += 1
             api_messages = self._inject_budget(api_messages, tool_turns, max_tool_turns, tokens_now)
             api_messages = self._inject_tool_budget(api_messages, tool_turns, max_tool_turns)
+            self._last_api_messages = [dict(m) for m in api_messages]
+            self._last_api_tools = tools
+            self._last_api_turn = tool_turns
             start_time = time.time()
             data = self._call_api(
                 api_messages,
@@ -617,10 +1065,39 @@ class AgentCore:
                 est_tokens = max(len(content) // 4, 1)
                 self.last_tps = est_tokens / elapsed if elapsed > 0 else 0.0
             if "error" in data:
-                error_msg = f"API-ERROR: {data['error']}"
-                history.append({"role": "assistant", "content": error_msg})
-                self.session_manager.save_session(self.session_id, history)
-                return error_msg
+                if data.get("error_kind") == "tool_parse" and tools:
+                    if tool_parse_retries < 1:
+                        tool_parse_retries += 1
+                        console.print("[dim yellow]🛠️ Tool-Call-JSON kaputt → Retry mit Repair-Hinweis[/dim yellow]")
+                        hint = ("[SYSTEM NOTE] Your previous tool call contained invalid JSON "
+                                "(literal newlines inside a string value). Keep tool arguments "
+                                "as single-line JSON and escape newlines as \\n. Retry the call now.")
+                        retry_msgs = list(api_messages) + [{"role": "user", "content": hint}]
+                        data = self._call_api(retry_msgs, tools,
+                                            base_url=api_base, model=api_model,
+                                            api_key=api_key)
+                    if "error" in data and data.get("error_kind") == "tool_parse":
+                        console.print("[dim yellow]🛠️ Immer noch kaputt → Antwort ohne Tools (History ent-tool-t)[/dim yellow]")
+                        stripped = self._strip_tool_history(api_messages)
+                        stripped.append({
+                            "role": "user",
+                            "content": ("[SYSTEM NOTE] Tools are DISABLED for this turn. "
+                                        "Do NOT emit tool-call JSON or <tool_call> blocks. "
+                                        "Answer in plain markdown; put code in ``` blocks.")})
+                        data = self._call_api(stripped, [],
+                                            base_url=api_base, model=api_model,
+                                            api_key=api_key)
+                if "error" in data:
+                    error_msg = f"API-ERROR: {data['error']}"
+                    history.append({"role": "assistant", "content": error_msg})
+                    if data.get("error_kind") == "tool_parse":
+                        history.append({"role": "user", "content": (
+                            "[SYSTEM NOTE] Dein geplanter Tool-Call ist an ungültigem JSON "
+                            "gescheitert (literal newlines in Arguments). Gib Code ab jetzt "
+                            "als ```codeblock``` in der Antwort aus statt write_file aufzurufen — "
+                            "oder escape Newlines als \\n.")})
+                    self.session_manager.save_session(self.session_id, history)
+                    return error_msg
             choice = data.get("choices", [{}])[0]
             assistant_msg = choice.get("message", {})
             content = assistant_msg.get("content", "") or ""
@@ -634,6 +1111,9 @@ class AgentCore:
                 return error_msg
             assistant_entry = {"role": "assistant", "content": content}
             if tool_calls:
+                for tc in tool_calls:
+                    func = tc.get("function", {})
+                    func["arguments"] = self._repair_args_string(func.get("arguments", "{}"))
                 assistant_entry["tool_calls"] = tool_calls
             history.append(assistant_entry)
             self.session_manager.save_session(self.session_id, history)
@@ -649,7 +1129,7 @@ class AgentCore:
                 session_tokens = self.session_manager.get_total_tokens(
                     self.session_id, self.system_prompt, tools, override_history=expanded_check)
                 if session_tokens > self.compression_threshold:
-                    console.print(f"[dim yellow]⚠️  Session-Tokens ({session_tokens}) > Threshold ({self.compression_threshold}). Auto-Kompression...[/dim yellow]")
+                    console.print(f"[dim yellow]⚠️  Session-Tokens ({session_tokens}) > Threshold ({self.compression_threshold}). Auto-Compression...[/dim yellow]")
                     result = self.compress_history()
                     console.print(f"[dim]{result}[/dim]")
                     history = self.session_manager.load_session(self.session_id)
@@ -698,7 +1178,7 @@ class AgentCore:
                     self._print_answer(display)
                     console.print()
             memory_tools_used = False
-            round_max_res = self.config.get("max_tool_result_length", 4000)
+            round_max_res = self.config.get("max_tool_result_length", 3000)
             if self.config.get("loop_adaptive_cap", True) and tokens_now and tokens_now > int(self.context_size * 0.6):
                 round_max_res = max(1200, round_max_res // 2)
             for tc in tool_calls:
@@ -728,8 +1208,9 @@ class AgentCore:
                         "sys_update": "📦",
                         "bash": "⚡",
                         "bg_task": "🚀",
-                        "cd": "🧷",
+                        "cd": "🫚",
                         "weather": "🌤️",
+                        "tarot": "🔮",
                         "news_digest": "📰",
                         "brightness_ctl": "💡",
                         "lint_code": "🔎",}
@@ -759,7 +1240,7 @@ class AgentCore:
                                 hint = f"\n[... truncated, use read_cache with path={sm._cache_file(self.session_id, tc_id)} for full output]"
                         dbg = self._debug_level()
                         if dbg == 1:
-                            console.print("[dim red]✂️[/dim red]")
+                            console.print("✂️")
                         elif dbg == 2:
                             cache_info = (f" | Cache: {sm._cache_file(self.session_id, tc_id)} ({n_chunks} chunks)" if cached else " | no cache (offloading off)")
                             console.print(f"[dim red]DEBUG ✂️ {name}: {len(result_str)} → {MAX_RES} Zeichen{cache_info}[/dim red]")
@@ -794,22 +1275,26 @@ class AgentCore:
             if send_image_markers:
                 self._pending_image_markers = send_image_markers
 
-    def _call_meta_api(self, messages: List[Dict[str, Any]], max_tokens: int = 400):
+    def _call_meta_api(self, messages: List[Dict[str, Any]], max_tokens: int = 512,
+                       task: str = "meta"):
         meta_max = int(self.config.get("meta_model_max_tokens", 0) or 0)
         if meta_max > 0:
             max_tokens = meta_max
+        base, model, api_key, timeout = self._meta_endpoint(task)
         data = self._post_chat(
-            base=self.config.get("meta_model_url", ""),
-            model=self.config.get("meta_model_name", "meta"),
-            api_key=self.config.get("meta_api_key", "") or self.api_key,
-            timeout=int(self.config.get("meta_model_timeout", 60)),
+            base=base,
+            model=model,
+            api_key=api_key,
+            timeout=timeout,
             messages=messages,
             max_tokens=max_tokens,
             temperature=0.2,
-            label="meta")
+            label=f"meta:{task}")
         if data:
             return data
         if bool(self.config.get("meta_fallback_enabled", True)):
+            if base == str(self.config.get("base_url", "")).rstrip("/"):
+                return None
             return self._post_chat(
                 base=self.base_url,
                 model=self.model,
@@ -920,9 +1405,12 @@ class AgentCore:
                 i -= 1
         return tail
 
-    def _meta_char_budget(self, max_out_tokens: int) -> int:
+    def _meta_char_budget(self, max_out_tokens: int, task: str = "meta") -> int:
         try:
-            meta_ctx = int(self.config.get("meta_context_size", 4096) or 4096)
+            if self._meta_endpoint(task)[0] == str(self.config.get("base_url", "")).rstrip("/"):
+                meta_ctx = int(self.config.get("context_size", 4096) or 4096)
+            else:
+                meta_ctx = int(self.config.get("meta_context_size", 4096) or 4096)
         except (TypeError, ValueError):
             meta_ctx = 4096
         instruction_tokens = 150
@@ -930,45 +1418,44 @@ class AgentCore:
         input_tokens = max(500, meta_ctx - max_out_tokens - instruction_tokens - safety)
         return int(input_tokens * 3)
 
-    def _condense_chunk(self, chunk: str, max_out: int, part_label: str = "") -> Optional[str]:
+    def _condense_chunk(self, chunk: str, max_out: int, part_label: str = "", task: str = "meta") -> Optional[str]:
         prompt = (
             "Condense this agent's tool trace into a concise "
             "progress report (max. 150 words). Include: goal, completed steps "
             "(files/commands/results), open issues, next step."
             + (f" This is part {part_label} of a longer trace." if part_label else "")
             + "\nTRACE:\n" + chunk)
-        data = self._call_meta_api([{"role": "user", "content": prompt}],
-                                   max_tokens=max_out)
+        data = self._call_meta_api([{"role": "user", "content": prompt}], max_tokens=max_out, task=task)
         if data:
             content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
             if content and content.strip():
                 return content.strip()
         return None
 
-    def _merge_partials(self, merged: str, max_out: int) -> Optional[str]:
+    def _merge_partials(self, merged: str, max_out: int, task: str = "meta") -> Optional[str]:
         prompt = (
             "Merge these partial progress reports of ONE ongoing task into a "
             "single concise progress report (max. 150 words). Include: goal, "
             "completed steps, open issues, next step.\nPARTIALS:\n" + merged)
-        data = self._call_meta_api([{"role": "user", "content": prompt}],
-                                   max_tokens=max_out)
+        data = self._call_meta_api([{"role": "user", "content": prompt}], max_tokens=max_out)
         if data:
             content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
             if content and content.strip():
                 return content.strip()
         return None
 
-    def _condense_trace_meta(self, trace: str) -> Optional[str]:
+    def _condense_trace_meta(self, trace: str, task: str = "rescue") -> Optional[str]:
         try:
-            max_out = int(self.config.get("meta_summary_max_tokens", 300) or 300)
+            max_out = int(self.config.get("meta_summary_max_tokens", 512) or 512)
         except (TypeError, ValueError):
             max_out = 300
-        budget = self._meta_char_budget(max_out)
+        budget = self._meta_char_budget(max_out, task=task)
         partials = []
         for i in range(0, len(trace), budget):
             condensed = self._condense_chunk(
                 trace[i:i + budget], max_out,
-                part_label=f"{len(partials) + 1}")
+                part_label=f"{len(partials) + 1}",
+                task=task)
             if condensed:
                 partials.append(condensed)
         if not partials:
@@ -978,7 +1465,7 @@ class AgentCore:
         while len(partials) > 1:
             merged = "\n".join(f"- {p}" for p in partials)
             if len(merged) <= budget:
-                return self._merge_partials(merged, max_out) or partials[0]
+                return self._merge_partials(merged, max_out, task=task) or partials[0]
             new_partials = []
             window, size = [], 0
             for p in partials:
@@ -992,10 +1479,7 @@ class AgentCore:
                 window.append(p)
                 size += cost
             if window:
-                new_partials.append(
-                    self._merge_partials(
-                        "\n".join(f"- {x}" for x in window), max_out)
-                    or window[0])
+                new_partials.append(self._merge_partials("\n".join(f"- {x}" for x in window), max_out, task=task) or window[0])
             partials = new_partials
         return partials[0]
 
@@ -1046,8 +1530,8 @@ class AgentCore:
         free = max(0, self.context_size - tokens_now)
         pct = int((tokens_now / self.context_size) * 100) if self.context_size else 0
         hint = (
-            f"\n[BUDGET] Kontext {pct}% belegt (~{free // 1000}k frei). "
-            f"Bei >80%: abschließen statt neu beginnen.")
+            f"\n[BUDGET] Context {pct}% in use (~{free // 1000}k free). "
+            f"If >80%: finish instead of starting over.")
         user_idx = None
         for i in range(len(api_messages) - 1, -1, -1):
             if api_messages[i].get("role") == "user":
@@ -1266,7 +1750,6 @@ class AgentCore:
                 "active": func.get("name", "") in self.tool_manager.active_tools})
         return tools
 
-
     def _pause_spinner(self):
         st = getattr(self, "_active_status", None)
         if st:
@@ -1319,16 +1802,11 @@ class ChatInterface:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                console.print(f"[dim red]Scheduler-Fehler: {e}[/dim red]")
+                console.print(f"[dim red]Scheduler-Failure: {e}[/dim red]")
 
     def _on_notification(self, msg: str):
         if any(x in msg for x in ("💉", "🧠", "🔔", "🔕", "🔊", "🔇", "🤔", "💭", "💾")):
             self._set_status(msg, 4.0)
-#        if self._active_status is not None:
-#            try:
-#                self._active_status.update(f"[bold cyan]{msg}[/bold cyan]")
-#            except Exception:
-#                pass
 
     def _get_bottom_toolbar(self):
         now = time.time()
@@ -1475,7 +1953,7 @@ class ChatInterface:
                             console.print(f"[bold cyan]available sessions ({len(sessions_with_time)}):[/bold cyan]")
                             for s, _, ts in sessions_with_time:
                                 marker = " ← [green]aktiv[/green]" if s == current else ""
-                                console.print(f"  • [bold]{s}[/bold] (Zugriff: {ts}){marker}")
+                                console.print(f"  • [bold]{s}[/bold] (Access: {ts}){marker}")
                             console.print("[dim]   /session <id> to change[/dim]")
                         else:
                             console.print("[yellow]No sessions available.[/yellow]")
@@ -1557,7 +2035,10 @@ Last accessed:{last_access}
 Aktiv Tools: {', '.join(active) if active else 'Keine'}
 {rag_info}"""
                     console.print(info_text)
-                elif cmd in ("/zip", "/shrink"):
+                elif cmd == '/zip':
+                    result = self.agent.compress_history()
+                    console.print(f"[bold cyan]{result}[/bold cyan]")
+                elif cmd == '/shrink':
                     result = self.agent.compress_history()
                     console.print(f"[bold cyan]{result}[/bold cyan]")
                 elif cmd == '/listtools':
@@ -1586,9 +2067,9 @@ Aktiv Tools: {', '.join(active) if active else 'Keine'}
                         console.print(f"[bold yellow]💾 Offloading: {status}[/bold yellow]")
                         self._set_status(f"Offloading: {status}", 2)
                         if self.agent.offloading_enabled:
-                            console.print("[dim]   Tool-Args/Results werden in Cache ausgelagert.[/dim]")
+                            console.print("[dim]   Tool-Args/Results are stored in the cache.[/dim]")
                         else:
-                            console.print("[dim]   Tool-Args/Results bleiben in der History.[/dim]")
+                            console.print("[dim]   Tool-Args/Results  remain in history.[/dim]")
                     else:
                         console.print("[bold red]❌ Usage: /offloading [on|off][/bold red]")
                 elif cmd == '/sound':
@@ -1624,9 +2105,9 @@ Aktiv Tools: {', '.join(active) if active else 'Keine'}
                         console.print(f"[bold yellow]🤔 Thinking: {status}[/bold yellow]")
                         self._set_status(f" Think: {status}", 2)
                         if self.agent.show_thinking:
-                            console.print("[dim]   Modell-Thinking-Bloecke werden angezeigt.[/dim]")
+                            console.print("[dim]   Modell-Thinking-blocks are displayed.[/dim]")
                         else:
-                            console.print("[dim]   Modell-Thinking-Bloecke werden ausgefiltert.[/dim]")
+                            console.print("[dim]   Modell-Thinking-blocks are filtered out.[/dim]")
                     else:
                         console.print("[bold red]❌ Usage: /showThinking [on|off][/bold red]")
 
@@ -1636,16 +2117,16 @@ Aktiv Tools: {', '.join(active) if active else 'Keine'}
                     else:
                         parts = arg.split(' ', 1)
                         img_path = parts[0]
-                        img_text = parts[1] if len(parts) > 1 else "Describe this picture."
+                        img_text = parts[1] if len(parts) > 1 else "describe this picture."
 
                         if not bool(self.agent.config.get("vision_enabled", True)):
                             console.print(
-                                "[bold red]❌ Vision is disabled. "
-                                "Set vision_enabled=true in config.json.[/bold red]")
+                                "[bold red]❌ Vision disabled. "
+                                "set vision_enabled=true in config.json.[/bold red]")
                             continue
                         b64_url = self.agent._process_image(img_path)
                         if b64_url:
-                            console.print(f"[bold green]🖼️ Image processed:{img_path}[/bold green]")
+                            console.print(f"[bold green]🖼️ Image processed: {img_path}[/bold green]")
                             console.print("[bold cyan]Analyzing...[/bold cyan]")
                             try:
                                 response = await asyncio.to_thread(
@@ -1699,13 +2180,13 @@ Aktiv Tools: {', '.join(active) if active else 'Keine'}
                     if not os.path.exists(tmp_wav) or os.path.getsize(tmp_wav) == 0:
                         console.print("[bold red]❌ Recording failed or empty.[/bold red]")
                         continue
-                    console.print("[bold cyan]📝 transcribe...[/bold cyan]")
+                    console.print("[bold cyan]📝 Transcribe...[/bold cyan]")
                     stt_cmd = self.agent.config.get("stt_command", "")
                     if not stt_cmd:
                         if shutil.which("whisper"):
                             stt_cmd = "whisper {audio} --model tiny --language German --output_format txt --output_dir {dir}"
                         else:
-                            console.print("[bold red]❌ No STT configured. Install whisper or set ‘stt_command’ in config.json.[/bold red]")
+                            console.print("[bold red]❌ No STT configured. Install whisper or set 'stt_command' in config.json.[/bold red]")
                             continue
                     txt_dir = tempfile.mkdtemp()
                     formatted_cmd = stt_cmd.format(audio=tmp_wav, dir=txt_dir)
@@ -1719,7 +2200,7 @@ Aktiv Tools: {', '.join(active) if active else 'Keine'}
                         else:
                             transcript = result.stdout.strip()
                     except Exception as e:
-                        console.print(f"[bold red]❌ STT-Fehler: {e}[/bold red]")
+                        console.print(f"[bold red]❌ STT-Failure: {e}[/bold red]")
                         continue
                     finally:
                         try:
@@ -1729,9 +2210,9 @@ Aktiv Tools: {', '.join(active) if active else 'Keine'}
                         except:
                             pass
                     if not transcript:
-                        console.print("[yellow]⚠️ No transcript was provided.[/yellow]")
+                        console.print("[yellow]⚠️ Keine Transkription erhalten.[/yellow]")
                         continue
-                    console.print(f"[bold green]📝 Transkript:[/bold green] {transcript}")
+                    console.print(f"[bold green]📝 Transcript:[/bold green] {transcript}")
                     try:
                         response = await asyncio.to_thread(self.agent.chat, transcript)
                         if response:
@@ -1745,7 +2226,7 @@ Aktiv Tools: {', '.join(active) if active else 'Keine'}
                         personas_dir = p("personas")
                         if os.path.exists(personas_dir):
                             files = sorted([f.replace(".md", "") for f in os.listdir(personas_dir) if f.endswith(".md")])
-                            console.print("[bold cyan]available personas:[/bold cyan]")
+                            console.print("[bold cyan]Verfügbare Persönlichkeiten:[/bold cyan]")
                             for persona in files:
                                 console.print(f"  • {persona}")
                             console.print("[dim]   /personality <name> to switch[/dim]")
@@ -1765,7 +2246,7 @@ Aktiv Tools: {', '.join(active) if active else 'Keine'}
                             console.print("[bold cyan]Verfügbare Persönlichkeiten:[/bold cyan]")
                             for persona in files:
                                 console.print(f"  • {persona}")
-                            console.print("[dim]   /personality <name> zum Wechseln[/dim]")
+                            console.print("[dim]   /personality <name> to switch[/dim]")
                         else:
                             console.print("[bold red]❌ personas/ directory not found.[/bold red]")
                     else:
@@ -1787,11 +2268,53 @@ Aktiv Tools: {', '.join(active) if active else 'Keine'}
                         status = "AN" if frame_on else "AUS"
                         console.print(f"[bold yellow]🖼️ Rahmen: {status}[/bold yellow]")
                         if frame_on:
-                            console.print("[dim]   Antworten werden in einem Panel-Rahmen angezeigt.[/dim]")
+                            console.print("[dim]   Answers are displayed in a panel frame.[/dim]")
                         else:
-                            console.print("[dim]   Antworten werden ohne Rahmen angezeigt.[/dim]")
+                            console.print("[dim]   Replies are displayed without borders.[/dim]")
                     else:
                         console.print("[bold red]❌ Usage: /frame [on|off][/bold red]")
+                elif cmd == '/context':
+                    msgs = getattr(self.agent, "_last_api_messages", None)
+                    if not msgs:
+                        console.print("[yellow]⚠️ No API calls have been made in this session yet.[/yellow]")
+                        continue
+                    tools = getattr(self.agent, "_last_api_tools", []) or []
+                    turn = getattr(self.agent, "_last_api_turn", "?")
+                    tool_names = [t.get("function", {}).get("name", "?") for t in tools]
+                    console.print(Panel(
+                        f"[bold cyan]RAM Context — Most Recently Sent (Tool-Turn {turn})[/bold cyan]\n"
+                        f"Messages: {len(msgs)} | Tools activ: {len(tools)}"
+                        + (f" ({', '.join(tool_names)})" if tool_names else ""),
+                        expand=False))
+                    if arg == "json":
+                        console.print(Panel(
+                            json.dumps(msgs, indent=2, ensure_ascii=False),
+                            title="RAW JSON"))
+                        continue
+                    role_style = {"system": "magenta", "user": "blue",
+                                "assistant": "green", "tool": "yellow"}
+                    for i, m in enumerate(msgs):
+                        role = m.get("role", "?")
+                        content = m.get("content", "")
+                        if isinstance(content, list):
+                            parts = []
+                            for item in content:
+                                if isinstance(item, dict):
+                                    if item.get("type") == "text":
+                                        parts.append(str(item.get("text", "")))
+                                    elif item.get("type") == "image_url":
+                                        parts.append("[IMAGE_B64]")
+                            content = "\n".join(parts)
+                        head = f"[bold {role_style.get(role, 'white')}]{i:02d} {role.upper()}[/bold {role_style.get(role, 'white')}]"
+                        tcs = m.get("tool_calls")
+                        if tcs:
+                            names = ", ".join(tc.get("function", {}).get("name", "?") for tc in tcs)
+                            head += f" [bold yellow]🔧 → {names}[/bold yellow]"
+                        if m.get("tool_call_id"):
+                            head += f" [dim](call_id={str(m['tool_call_id'])[:12]}…)[/dim]"
+                        console.print(head)
+                        console.print(str(content))
+                        console.print()
                 elif cmd == '/help':
                     help_text = """
 [bold blue]Verfügbare Commands:[/bold blue]
@@ -1811,11 +2334,12 @@ Aktiv Tools: {', '.join(active) if active else 'Keine'}
 /showThinking [on|off]     – Thinking-Bloecke anzeigen
 /image <path>      – Bild analysieren (Vision-Modell)
 /threshold         – Aktuellen Compression-Threshold anzeigen
+/context [json]    – RAM-Kontext zeigen (exakt das, was zuletzt an die API ging)
 /help              – Diese Hilfe
 """
                     console.print(help_text)
                 else:
-                    console.print(f"[bold red]Unbekanntes Command: {cmd}[/bold red]")
+                    console.print(f"[bold red]Unknown Command: {cmd}[/bold red]")
                 continue
             self._set_status("💭", 0)
             response = None
@@ -1842,7 +2366,7 @@ Aktiv Tools: {', '.join(active) if active else 'Keine'}
                 if self.agent.tts_manager and self.agent.tts_manager.enabled:
                     self.agent.tts_manager.speak(response)
             else:
-                console.print("[yellow]Agent lieferte eine leere Antwort.[/yellow]")
+                console.print("[yellow]agent gave noncommittal answer.[/yellow]")
             try:
                 width = os.get_terminal_size().columns
             except OSError:
