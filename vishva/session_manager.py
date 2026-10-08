@@ -198,13 +198,11 @@ class SessionManager:
                 name = msg.get("name", "")
                 if name:
                     pieces.append(name)
-
         has_system_in_history = history[0].get("role") == "system"
         if full_system_prompt and not has_system_in_history:
             pieces.append(full_system_prompt)
         if tools:
             pieces.append(json.dumps(tools, ensure_ascii=False))
-
         if self.token_counting == "server":
             total = self._count_tokens("\n".join(pieces))
             total += 4 * msg_count
@@ -230,7 +228,6 @@ class SessionManager:
         if not middle_msgs:
             self._cleanup_session_cache(session_id, history)
             return None
-
         if rag_offload:
             offloaded_turns = sum(1 for m in middle_msgs if m.get("role") == "user")
             new_history = [system_msg]
@@ -245,7 +242,6 @@ class SessionManager:
             self._cleanup_orphaned_folders()
             return {"old_len": history_len, "new_len": len(new_history),
                     "mode": "rag_offload", "offloaded_turns": offloaded_turns}
-
         summary = self._summarize(middle_msgs)
         if not summary:
             self._cleanup_session_cache(session_id, history)
@@ -294,12 +290,10 @@ class SessionManager:
         except (TypeError, ValueError):
             max_out = 500
         budget = self._meta_char_budget(max_out)
-
         meta_base = str(self.config.get("meta_model_url", "") or "")
         meta_model = str(self.config.get("meta_model_name", "") or "")
         meta_key = self.config.get("meta_api_key", "") or self.api_key
         meta_timeout = int(self.config.get("meta_model_timeout", 60))
-
         system_text = (
             "Compression Wizard: Summarize the conversation into a concise, "
             "token-efficient summary. Be sure to INCLUDE:\n"
@@ -623,23 +617,29 @@ class SessionManager:
                     func = tc.get("function", {})
                     name = func.get("name", "")
                     arguments = func.get("arguments", "")
-                    if len(arguments) > MAX_ARGS:
-                        if offload:
-                            entry = self._load_cache_entry(session_id, tc_id)
-                            if not entry:
-                                entry = {}
-                            entry.update({"name": name, "arguments": arguments})
-                            self._save_cache_entry(session_id, tc_id, entry)
-                        truncated = arguments[:MAX_ARGS] + (
-                            f"\n[... truncated, full arguments in cache: "
-                            f"path={self._cache_file(session_id, tc_id)}]")
+                    if len(arguments) > MAX_ARGS and offload:
+                        # Voll-Arguments in den Cache auslagern ...
+                        entry = self._load_cache_entry(session_id, tc_id)
+                        if not entry:
+                            entry = {}
+                        entry.update({"name": name, "arguments": arguments})
+                        self._save_cache_entry(session_id, tc_id, entry)
+                        # ... und in der History ein KOMPAKTES, VALIDES JSON-Stub
+                        # setzen (NIEMALS mid-cutten — sonst bricht das JSON
+                        # und der Server kann die History nicht mehr parsen).
+                        stub = json.dumps({
+                            "_offloaded": True,
+                            "cache_path": self._cache_file(session_id, tc_id),
+                            "hint": "full arguments offloaded; use read_cache to retrieve"
+                        }, ensure_ascii=False)
                         new_tc = {
                             "id": tc_id,
                             "type": tc.get("type", "function"),
                             "function": {
                                 "name": name,
-                                "arguments": truncated}}
+                                "arguments": stub}}
                     else:
+                        # offload aus ODER Arguments klein genug: unverändert lassen
                         new_tc = tc
                     new_tool_calls.append(new_tc)
                 new_msg["tool_calls"] = new_tool_calls

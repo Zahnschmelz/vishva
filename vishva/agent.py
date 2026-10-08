@@ -807,7 +807,10 @@ class AgentCore:
                 data = response.json()
                 choice = data.get("choices", [{}])[0]
                 msg = choice.get("message", {})
-                reasoning = msg.get("reasoning") or msg.get("thinking") or ""
+                reasoning = (msg.get("reasoning")
+                             or msg.get("thinking")
+                             or msg.get("reasoning_content")
+                             or "")
                 if reasoning:
                     data["_extracted_reasoning"] = reasoning
                 return data
@@ -1068,7 +1071,7 @@ class AgentCore:
                 if data.get("error_kind") == "tool_parse" and tools:
                     if tool_parse_retries < 1:
                         tool_parse_retries += 1
-                        console.print("[dim yellow]🛠️ Tool-Call-JSON kaputt → Retry mit Repair-Hinweis[/dim yellow]")
+                        console.print("[dim yellow]🛠️ Tool Call JSON broken → Retry with repair note[/dim yellow]")
                         hint = ("[SYSTEM NOTE] Your previous tool call contained invalid JSON "
                                 "(literal newlines inside a string value). Keep tool arguments "
                                 "as single-line JSON and escape newlines as \\n. Retry the call now.")
@@ -1077,7 +1080,7 @@ class AgentCore:
                                             base_url=api_base, model=api_model,
                                             api_key=api_key)
                     if "error" in data and data.get("error_kind") == "tool_parse":
-                        console.print("[dim yellow]🛠️ Immer noch kaputt → Antwort ohne Tools (History ent-tool-t)[/dim yellow]")
+                        console.print("[dim yellow]🛠️ Still broken → Answer without tools (History ent-tool-t)[/dim yellow]")
                         stripped = self._strip_tool_history(api_messages)
                         stripped.append({
                             "role": "user",
@@ -1092,10 +1095,10 @@ class AgentCore:
                     history.append({"role": "assistant", "content": error_msg})
                     if data.get("error_kind") == "tool_parse":
                         history.append({"role": "user", "content": (
-                            "[SYSTEM NOTE] Dein geplanter Tool-Call ist an ungültigem JSON "
-                            "gescheitert (literal newlines in Arguments). Gib Code ab jetzt "
-                            "als ```codeblock``` in der Antwort aus statt write_file aufzurufen — "
-                            "oder escape Newlines als \\n.")})
+                            "[SYSTEM NOTE] Your tool call "
+                            "failed due to invalid JSON (literal newlines in the arguments). From now on, output code "
+                            "as a ```codeblock``` in the response instead of calling `write_file` — "
+                            "or escape newlines as `\\n`.")})
                     self.session_manager.save_session(self.session_id, history)
                     return error_msg
             choice = data.get("choices", [{}])[0]
@@ -1107,7 +1110,30 @@ class AgentCore:
                 content = reasoning
                 reasoning = ""
             if not content.strip() and not tool_calls:
-                error_msg = "⚠️ The model returned an empty response. Please repeat the question or start /new."
+                # --- Thinking-Block retten & ausgeben, BEVOR der Fehler kommt ---
+                thinking_raw = (
+                    reasoning
+                    or assistant_msg.get("reasoning", "")
+                    or assistant_msg.get("reasoning_content", "")
+                    or assistant_msg.get("thinking", "")
+                    or ""
+                ).strip()
+                # Fall: Thinking steckt als Tags im Content und wurde nie separiert
+                if not thinking_raw and content.strip():
+                    if not self._strip_thinking(content).strip():
+                        thinking_raw = content.strip()
+                if thinking_raw:
+                    console.print(Panel(
+                        thinking_raw[:2000],
+                        title="[bold yellow]💭 Thinking (Antwort war leer)[/bold yellow]",
+                        border_style="yellow"))
+                    self._notify(f"💭 Thinking (leere Antwort): {thinking_raw[:100]}…")
+                error_msg = ("⚠️ The model returned an empty response. "
+                             "Please repeat the question or start /new.")
+                if thinking_raw and (self.show_thinking or self._debug_level() >= 1):
+                    error_msg += f"\n[THINKING]\n{thinking_raw[:1500]}"
+                history.append({"role": "assistant", "content": error_msg})
+                self.session_manager.save_session(self.session_id, history)
                 return error_msg
             assistant_entry = {"role": "assistant", "content": content}
             if tool_calls:
@@ -2353,12 +2379,10 @@ Aktiv Tools: {', '.join(active) if active else 'Keine'}
                 finally:
                     self._active_status = None
                     self.agent._active_status = None
-
             if response is None:
                 continue
             if self._status_message.startswith("💭"):
                 self._status_message = ""
-
             if self.agent.sound_enabled:
                 _play_notification_sound()
             if response:
