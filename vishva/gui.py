@@ -9,7 +9,8 @@ import datetime
 import tempfile
 import threading
 import subprocess
-from .paths import p, cfg_path
+#from .paths import p, cfg_path
+from .paths import p
 from PySide6.QtCore import QTimer, Signal, Slot, Qt
 from .scheduler import TaskScheduler, process_due_tasks
 
@@ -29,7 +30,8 @@ except ImportError:
     sys.exit(1)
 from .agent import AgentCore
 try:
-    from .agent import _play_notification_sound
+    # from .agent import _play_notification_sound
+    from .cli import _play_notification_sound
 except Exception:
     _play_notification_sound = None
 
@@ -878,7 +880,7 @@ class MainWindow(QMainWindow):
 
         try:
             from .tts_manager import TTSManager
-            self.agent.tts_manager = TTSManager(self.agent.config)
+            self.agent.tts_manager = TTSManager()
             self.agent.tts_manager.enabled = bool(enabled)
             self.agent.config["tts_enabled"] = bool(enabled)
             if hasattr(self.agent.tool_manager, "tts_manager"):
@@ -1125,7 +1127,7 @@ class MainWindow(QMainWindow):
                 marker = " ← **aktiv**" if s == current else ""
                 lines.append(f"- `{s}` ({ts}){marker}")
             self.append(
-                "Sessions",
+                p("data", "sessions"),
                 "\n".join(lines) + "\n\nUsage: `/session <id>`")
         except Exception as e:
             self.append("Error", str(e))

@@ -1,10 +1,13 @@
 import os
+import re
 import json
 import uuid
-import requests
 import time
+import datetime
+import requests
+#from .paths import p, cfg_path
+from .paths import p
 from typing import Dict, List, Any, Optional, Set
-from .paths import p, cfg_path
 try:
     import tiktoken
     TIKTOKEN_AVAILABLE = True
@@ -12,6 +15,7 @@ except ImportError:
     TIKTOKEN_AVAILABLE = False
 
 class SessionManager:
+    meta_call_fn = None
     def __init__(self, config_path: str = None):
         self.config_path = config_path or p("config", "config.json")
         self.config = self._load_config()
@@ -30,6 +34,8 @@ class SessionManager:
                 self.tokenizer = tiktoken.get_encoding("cl100k_base")
         else:
             self.tokenizer = None
+
+        self.cleanup_orphan_seeds()
 
     def _debug_level(self) -> int:
         v = self.config.get("debug", 0)
@@ -141,6 +147,23 @@ class SessionManager:
             pass
         return {"removed": len(removed), "sessions": removed}
 
+    def cleanup_orphan_seeds(self):
+        """Löscht Seed-Files deren Session nicht mehr existiert."""
+        seed_dir = p("data", "seeds")
+        session_dir = p("data", "sessions")
+        if not os.path.isdir(seed_dir):
+            return
+        for fname in os.listdir(seed_dir):
+            if fname == "fixed.seed":
+                continue
+            sid = fname.rsplit(".", 1)[0]  # "abc123.seed" → "abc123"
+            session_file = os.path.join(session_dir, f"{sid}.json")
+            if not os.path.exists(session_file):
+                try:
+                    os.remove(os.path.join(seed_dir, fname))
+                except Exception:
+                    pass
+
     def _count_tokens(self, text: str) -> int:
         if self.token_counting == "server" and self.base_url:
             root = self.base_url.rstrip("/")
@@ -213,6 +236,66 @@ class SessionManager:
         total += 255 * image_count
         return total
 
+    # ---------- History-Archive ----------
+    def _archive_dir(self, session_id: str) -> str:
+        d = p("data", "history_archive", session_id)
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:
+            pass
+        return d
+
+    def _archive_history_block(self, session_id: str,
+                               block: List[Dict[str, Any]]) -> str:
+        """Exportiert den Kompressions-Block VOR der Kompression.
+        Returns absoluter Pfad der Archiv-Datei (leer bei Fehler)."""
+        if not block:
+            return ""
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        archive_dir = self._archive_dir(session_id)
+        fname = f"{ts}_{len(block)}msgs.json"
+        fpath = os.path.join(archive_dir, fname)
+        try:
+            with open(fpath, "w", encoding="utf-8") as f:
+                json.dump({
+                    "session_id": session_id,
+                    "archived_at": ts,
+                    "message_count": len(block),
+                    "messages": block
+                }, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"[Archive] Write failed: {e}")
+            return ""
+        self._cleanup_archive(session_id)
+        return os.path.abspath(fpath)
+
+    def _cleanup_archive(self, session_id: str):
+        """Behält nur die letzten N Archiv-Files pro Session."""
+        keep = int(self.config.get("history_archive_max_files", 10) or 0)
+        if keep <= 0:
+            return
+        d = self._archive_dir(session_id)
+        try:
+            files = sorted(f for f in os.listdir(d) if f.endswith(".json"))
+            for old in files[:-keep] if len(files) > keep else []:
+                try:
+                    os.remove(os.path.join(d, old))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _build_archive_note(self, archive_path: str) -> Dict[str, Any]:
+        """Nachricht, die VOR der Summary in die neue History kommt."""
+        return {
+            "role": "user",
+            "content": (
+                "[SYSTEM NOTE / ARCHIVE] The conversation block summarized below "
+                "was exported in FULL before compression.\n"
+                f"Archive file: {archive_path}\n"
+                "Use read_file on this path if you need exact details "
+                "(commands, file contents, decisions) from that block.")}
+
     def compress_history(self, session_id: str, rag_offload: bool = False) -> Optional[Dict[str, Any]]:
         history = self.load_session(session_id)
         history_len = len(history)
@@ -228,9 +311,18 @@ class SessionManager:
         if not middle_msgs:
             self._cleanup_session_cache(session_id, history)
             return None
+
+        # NEU: Kompressions-Block VOR der Kompression archivieren
+        archive_path = ""
+        if bool(self.config.get("history_archive_enabled", True)):
+            archive_path = self._archive_history_block(session_id, middle_msgs)
+
         if rag_offload:
             offloaded_turns = sum(1 for m in middle_msgs if m.get("role") == "user")
             new_history = [system_msg]
+            # NEU: Archiv-Verweis VOR der Offload-Note
+            if archive_path:
+                new_history.append(self._build_archive_note(archive_path))
             new_history.append({
                 "role": "assistant",
                 "content": "[CONTEXT_OFFLOADED] Older parts of this conversation have been moved to RAG's "
@@ -241,12 +333,17 @@ class SessionManager:
             self._cleanup_session_cache(session_id, new_history)
             self._cleanup_orphaned_folders()
             return {"old_len": history_len, "new_len": len(new_history),
-                    "mode": "rag_offload", "offloaded_turns": offloaded_turns}
+                    "mode": "rag_offload", "offloaded_turns": offloaded_turns,
+                    "archive": archive_path}
+
         summary = self._summarize(middle_msgs)
         if not summary:
             self._cleanup_session_cache(session_id, history)
             return None
         new_history = [system_msg]
+        # NEU: Archiv-Verweis VOR der Summary
+        if archive_path:
+            new_history.append(self._build_archive_note(archive_path))
         new_history.append({
             "role": "assistant",
             "content": f"[CONTEXT_SUMMARY] {summary}"})
@@ -254,7 +351,8 @@ class SessionManager:
         self.save_session(session_id, new_history)
         self._cleanup_session_cache(session_id, new_history)
         self._cleanup_orphaned_folders()
-        return {"old_len": history_len, "new_len": len(new_history), "summary": summary}
+        return {"old_len": history_len, "new_len": len(new_history),
+                "summary": summary, "archive": archive_path}
 
     def _sanitize_for_summary(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         sanitized = []
@@ -273,6 +371,161 @@ class SessionManager:
                 new_msg["content"] = content[:800] + " …[gekürzt für Summary]"
             sanitized.append(new_msg)
         return sanitized
+
+    # ---------- Context Rescue ----------
+    @staticmethod
+    def _tool_result_status(res_raw: str) -> str:
+        try:
+            res = json.loads(res_raw)
+        except Exception:
+            return (res_raw[:100] or "No results")
+        if isinstance(res, dict):
+            if res.get("error"):
+                return f"ERROR: {str(res['error'])[:100]}"
+            ok = res.get("success", res.get("status", ""))
+            extra = f" rc={res['returncode']}" if "returncode" in res else ""
+            msg = str(res.get("message") or res.get("output") or "")[:100]
+            return f"{'ok' if ok else '?'}{extra} {msg}".strip()
+        return res_raw[:100]
+
+    def extract_tool_trace(self, history: List[Dict[str, Any]]) -> str:
+        start = 0
+        for i in range(len(history) - 1, -1, -1):
+            if history[i].get("role") == "user":
+                start = i + 1
+                break
+        tool_results = {}
+        for m in history[start:]:
+            if m.get("role") == "tool":
+                tool_results[m.get("tool_call_id", "")] = m.get("content", "")
+        lines = []
+        for m in history[start:]:
+            if m.get("role") != "assistant" or not m.get("tool_calls"):
+                continue
+            for tc in m.get("tool_calls", []):
+                if tc.get("type") != "function":
+                    continue
+                func = tc.get("function", {})
+                name = func.get("name", "?")
+                try:
+                    args = json.loads(func.get("arguments", "{}"))
+                except Exception:
+                    args = {}
+                args_prev = json.dumps(args, ensure_ascii=False)[:80]
+                status = self._tool_result_status(
+                    tool_results.get(tc.get("id", ""), ""))
+                lines.append(f"- {name}({args_prev}): {status}")
+        return "\n".join(lines) if lines else "(keine Tool-Calls)"
+
+    @staticmethod
+    def last_tool_pairs(history: List[Dict[str, Any]], keep: int) -> List[Dict[str, Any]]:
+        if keep <= 0:
+            return []
+        tail: List[Dict[str, Any]] = []
+        i = len(history) - 1
+        groups = 0
+        while i >= 0 and groups < keep:
+            if history[i].get("role") == "tool":
+                j = i
+                while j >= 0 and history[j].get("role") == "tool":
+                    j -= 1
+                if j >= 0 and history[j].get("role") == "assistant" \
+                        and history[j].get("tool_calls"):
+                    tail = history[j:i + 1] + tail
+                    groups += 1
+                    i = j - 1
+                else:
+                    i -= 1
+            else:
+                i -= 1
+        return tail
+
+    def rescue_context(self, session_id: str, history: List[Dict[str, Any]],
+                       attempt: int, condense_fn=None, workdir: str = None):
+        """Context-Rescue: History kompakt umbauen + optional auto-compress.
+        condense_fn: Callback fn(trace) -> str|None für LLM-Zusammenfassung
+                     (kommt vom Agent; None = roher Trace)."""
+        # 1) Alte Progress-Notes entfernen (verhindert Wachstum pro Rescue)
+        system_msg = history[0] if history and history[0].get("role") == "system" else None
+        clean_history = [
+            msg for msg in history
+            if not (msg.get("role") == "user"
+                    and "[SYSTEM NOTE / PROGRESS]" in str(msg.get("content", "")))
+        ]
+        user_idx = None
+        for i in range(len(clean_history) - 1, -1, -1):
+            if clean_history[i].get("role") == "user":
+                user_idx = i
+                break
+        if user_idx is None:
+            user_idx = 0
+
+        # 2) Tool-Trace + Progress-File
+        trace = self.extract_tool_trace(clean_history)
+        prog_rel = ""
+        if workdir:
+            try:
+                prog_dir = os.path.join(workdir, ".progress")
+                os.makedirs(prog_dir, exist_ok=True)
+                prog_path = os.path.join(prog_dir, f"{session_id}.md")
+                ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                with open(prog_path, "a", encoding="utf-8") as f:
+                    f.write(f"\n## Rescue #{attempt} ({ts})\n{trace}\n")
+                prog_rel = f".progress/{session_id}.md"
+            except Exception:
+                pass
+
+        # 3) Kondensieren via Callback (LLM bleibt im Agent)
+        summary = trace
+        mode = str(self.config.get("loop_rescue_mode", "hybrid"))
+        if condense_fn is not None and mode in ("llm", "hybrid") and len(trace) > 600:
+            try:
+                condensed = condense_fn(trace)
+            except Exception:
+                condensed = None
+            if condensed:
+                summary = condensed
+
+        # 4) Kompakte History bauen
+        keep = int(self.config.get("loop_rescue_keep_last", 1))
+        tail = self.last_tool_pairs(clean_history, keep)
+        progress_msg = {
+            "role": "user",
+            "content": (
+                f"[SYSTEM NOTE / PROGRESS] Current status of the ongoing task "
+                f"(Rescue #{attempt}):\n{summary}\n"
+                + (f"Details available upon request: read_file {prog_rel}\n"
+                   if prog_rel else "")
+                + "Arbeite ab hier weiter. Wiederhole erledigte Schritte NICHT.")}
+        if system_msg:
+            new_history = [system_msg]
+            if user_idx > 0:
+                new_history.append(clean_history[user_idx])
+        else:
+            new_history = [clean_history[user_idx]]
+        new_history.append(progress_msg)
+        new_history.extend(tail)
+        self.save_session(session_id, new_history)
+        pre_len = len(new_history)
+
+        # 5) Auto-Compress nach dem Rescue (abschaltbar via Config)
+        compress_log = ""
+        if bool(self.config.get("loop_rescue_auto_compress", True)):
+            try:
+                result = self.compress_history(session_id, rag_offload=False)
+                if result:
+                    new_history = self.load_session(session_id)
+                    compress_log = (f" + auto-compress: "
+                                    f"{result.get('old_len', '?')} → "
+                                    f"{result.get('new_len', '?')} Messages")
+                else:
+                    compress_log = " (no compression needed)"
+            except Exception as e:
+                compress_log = f" (compress failed: {type(e).__name__})"
+
+        return (new_history,
+                f"Context-Rescue #{attempt}: {len(history)} → {pre_len} "
+                f"→ {len(new_history)} Messages{compress_log}")
 
     def _meta_char_budget(self, max_out_tokens: int) -> int:
         try:
@@ -602,13 +855,31 @@ class SessionManager:
                 i += 1
         return result
 
-    def compress_history_pointers(self, session_id: str, history: List[Dict[str, Any]], offload: bool = True) -> List[Dict[str, Any]]:
-        MAX_RESULT = self.config.get("max_tool_result_length", 500)
-        MAX_ARGS = self.config.get("max_tool_args_length", 2000)
+    def compress_history_pointers(self, session_id: str, history: List[Dict[str, Any]],
+                                   offload: bool = True, skip_last_tool_results: int = 0) -> List[Dict[str, Any]]:
+        """Offloadet Arguments in den Cache und kürzt Tool-Results.
+
+        skip_last_tool_results: Anzahl der letzten Tool-Results, die NICHT gekürzt werden
+                                (damit der Agent sie im aktuellen Turn vollständig sieht)."""
+        MAX_RESULT = self.config.get("max_tool_result_chars", 500)
+        MAX_ARGS = self.config.get("max_tool_args_chars", 500)
+
+        # Finde die Indizes aller Tool-Results
+        tool_result_indices = [i for i, msg in enumerate(history) if msg.get("role") == "tool"]
+
+        # Bestimme, welche Tool-Results gekürzt werden dürfen
+        if skip_last_tool_results > 0 and len(tool_result_indices) >= skip_last_tool_results:
+            # Nur die Tool-Results vor den letzten N kürzen
+            truncate_indices = set(tool_result_indices[:-skip_last_tool_results])
+        else:
+            # Alle Tool-Results kürzen
+            truncate_indices = set(tool_result_indices)
+
         new_history = []
         offload_count = 0
-        for msg in history:
+        for idx, msg in enumerate(history):
             role = msg.get("role")
+
             if role == "assistant" and msg.get("tool_calls"):
                 new_msg = {"role": "assistant", "content": msg.get("content", "")}
                 new_tool_calls = []
@@ -617,16 +888,16 @@ class SessionManager:
                     func = tc.get("function", {})
                     name = func.get("name", "")
                     arguments = func.get("arguments", "")
+
                     if len(arguments) > MAX_ARGS and offload:
-                        # Voll-Arguments in den Cache auslagern ...
+                        # Arguments in Cache auslagern
                         entry = self._load_cache_entry(session_id, tc_id)
                         if not entry:
                             entry = {}
                         entry.update({"name": name, "arguments": arguments})
                         self._save_cache_entry(session_id, tc_id, entry)
-                        # ... und in der History ein KOMPAKTES, VALIDES JSON-Stub
-                        # setzen (NIEMALS mid-cutten — sonst bricht das JSON
-                        # und der Server kann die History nicht mehr parsen).
+
+                        # Kompaktes JSON-Stub
                         stub = json.dumps({
                             "_offloaded": True,
                             "cache_path": self._cache_file(session_id, tc_id),
@@ -637,17 +908,21 @@ class SessionManager:
                             "type": tc.get("type", "function"),
                             "function": {
                                 "name": name,
-                                "arguments": stub}}
+                                "arguments": stub
+                            }
+                        }
                     else:
-                        # offload aus ODER Arguments klein genug: unverändert lassen
                         new_tc = tc
                     new_tool_calls.append(new_tc)
                 new_msg["tool_calls"] = new_tool_calls
                 new_history.append(new_msg)
+
             elif role == "tool":
                 tc_id = msg.get("tool_call_id", "unknown")
                 result = msg.get("content", "")
                 name = msg.get("name", "")
+
+                # Cache immer schreiben
                 if offload:
                     entry = self._load_cache_entry(session_id, tc_id)
                     if not entry:
@@ -660,16 +935,32 @@ class SessionManager:
                     self._save_cache_entry(session_id, tc_id, entry)
                     if is_new:
                         offload_count += 1
-                if len(result) > MAX_RESULT:
-                    short = result[:MAX_RESULT] + f"\n[... truncated, use read_cache with path={self._cache_file(session_id, tc_id)} for full output]"
+
+                # Prüfen, ob dieses Tool-Result gekürzt werden soll
+                should_truncate = idx in truncate_indices
+
+                if should_truncate and len(result) > MAX_RESULT:
+                    # Kürzen + Hint
+                    short = result[:MAX_RESULT]
+                    if offload:
+                        short += f"\n[... truncated, use read_cache with path={self._cache_file(session_id, tc_id)} for full output]"
+                    new_history.append({
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "name": name,
+                        "content": short
+                    })
                 else:
-                    short = result
-                new_history.append({
-                    "role": "tool",
-                    "tool_call_id": tc_id,
-                    "content": short})
+                    # Vollständiges Result (aktueller Turn oder unter dem Limit)
+                    new_history.append({
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "name": name,
+                        "content": result
+                    })
             else:
                 new_history.append(msg)
+
         if offload:
             self._cleanup_session_cache(session_id, new_history)
             if offload_count:
@@ -678,4 +969,206 @@ class SessionManager:
                     print("💾")
                 elif dbg == 2:
                     print(f"[DEBUG 💾] Offloading: {offload_count} Tool-Result(s) new to ", p("data", "agent_cache", session_id))
+
         return new_history
+
+    def add_continuation_marker(self, session_id: str):
+        history = self.load_session(session_id)
+        if not history or len(history) <= 1:
+            return
+
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        marker_text = (
+            f"[SYSTEM NOTE / SESSION_CONTINUED: {now}] "
+            "Note: Time has passed since the last interaction. "
+            "This is a continuation of a previous conversation.")
+
+        def _is_marker(m):
+            return (m.get("role") == "user"
+                    and "SESSION_CONTINUED:" in str(m.get("content", "")))
+        existing = [m for m in history if _is_marker(m)]
+        cleaned = [msg for msg in history if not _is_marker(msg)]
+        cleaned.append({"role": "user", "content": marker_text})
+        self.save_session(session_id, cleaned)
+        verify = self.load_session(session_id)
+        verify_markers = [m for m in verify if _is_marker(m)]
+
+    @staticmethod
+    def repair_args_string(s) -> str:
+        if not isinstance(s, str):
+            s = json.dumps(s, ensure_ascii=False)
+        try:
+            json.loads(s)
+            return s
+        except Exception:
+            pass
+
+        # 1) Restore aus dem Offloading-Cache (Hint enthält path=... oder "cache_path": "...")
+        m = re.search(r'(?:path=|"cache_path":\s*")([^\]\s"]+\.json)', s)
+        if m:
+            cpath = m.group(1)
+            try:
+                if os.path.exists(cpath):
+                    with open(cpath, "r", encoding="utf-8") as f:
+                        entry = json.load(f)
+                    full = entry.get("arguments")
+                    if full is None and isinstance(entry, dict):
+                        full = entry
+                    if isinstance(full, str):
+                        try:
+                            json.loads(full)
+                            return full
+                        except Exception:
+                            pass
+                    elif isinstance(full, dict):
+                        return json.dumps(full, ensure_ascii=False)
+            except Exception:
+                pass
+
+        # 2) Truncation-Marker entfernen, Control-Chars escapen, JSON schließen
+        cleaned = re.sub(r"\n?\[\.{3}[^\]]*truncated[^\]]*\]", "", s)
+        cleaned = re.sub(r"[\x00-\x1f]",
+                         lambda c: "\\u%04x" % ord(c.group(0)), cleaned)
+        if cleaned.endswith("\\"):
+            cleaned = cleaned[:-1]
+        for closer in ('"}', '"}}', '}', ''):
+            try:
+                json.loads(cleaned + closer)
+                return cleaned + closer
+            except Exception:
+                continue
+
+        # 3) Letzter Ausweg: valides Stub (History bleibt sendbar)
+        return json.dumps({
+            "_truncated": True,
+            "_note": "original arguments were truncated and could not be restored"
+        }, ensure_ascii=False)
+
+    def sanitize_history_tool_calls(self, history) -> bool:
+        """Repariert alle tool_call-Arguments in der History.
+        Returns True, wenn etwas geändert wurde."""
+        changed = False
+        for msg in history:
+            for tc in (msg.get("tool_calls") or []):
+                func = tc.get("function", {})
+                args = func.get("arguments", "{}")
+                fixed = self.repair_args_string(args)
+                if fixed != args:
+                    func["arguments"] = fixed
+                    changed = True
+        return changed
+
+    # ---------- Image-Collapse ----------
+    def collapse_history_images(self, history: List[Dict[str, Any]], keep_last_user: bool = False) -> bool:
+        """Ersetzt image_url-Content in älteren Messages durch Text-Platzhalter.
+        keep_last_user=True: die letzte User-Message behält ihr Bild.
+        Returns True, wenn etwas geändert wurde."""
+        changed = False
+        last_user_idx = None
+        if keep_last_user:
+            for i in range(len(history) - 1, -1, -1):
+                if history[i].get("role") == "user":
+                    last_user_idx = i
+                    break
+        for i, msg in enumerate(history):
+            if keep_last_user and i == last_user_idx:
+                continue
+            content = msg.get("content")
+            if isinstance(content, list):
+                new_content = []
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "image_url":
+                        new_content.append({"type": "text", "text": "[IMAGE_REMOVED]"})
+                        changed = True
+                    else:
+                        new_content.append(item)
+                msg["content"] = new_content
+        return changed
+
+    # ---------- Meta-Condense (braucht meta_call_fn) ----------
+    def _meta_char_budget(self, max_out_tokens: int) -> int:
+        try:
+            meta_ctx = int(self.config.get("meta_context_tokens",
+                             self.config.get("meta_context_size", 4096)) or 4096)
+        except (TypeError, ValueError):
+            meta_ctx = 4096
+        instruction_tokens = 150
+        safety = int(meta_ctx * 0.1)
+        input_tokens = max(500, meta_ctx - max_out_tokens - instruction_tokens - safety)
+        return int(input_tokens * 3)
+
+    def condense_chunk(self, chunk: str, max_out: int, part_label: str = "",
+                       task: str = "meta") -> Optional[str]:
+        if self.meta_call_fn is None:
+            return None
+        prompt = (
+            "Condense this agent's tool trace into a concise "
+            "progress report (max. 150 words). Include: goal, completed steps "
+            "(files/commands/results), open issues, next step."
+            + (f" This is part {part_label} of a longer trace." if part_label else "")
+            + "\nTRACE:\n" + chunk)
+        data = self.meta_call_fn([{"role": "user", "content": prompt}],
+                                 max_tokens=max_out, task=task)
+        if data:
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            if content and content.strip():
+                return content.strip()
+        return None
+
+    def merge_partials(self, merged: str, max_out: int,
+                       task: str = "meta") -> Optional[str]:
+        if self.meta_call_fn is None:
+            return None
+        prompt = (
+            "Merge these partial progress reports of ONE ongoing task into a "
+            "single concise progress report (max. 150 words). Include: goal, "
+            "completed steps, open issues, next step.\nPARTIALS:\n" + merged)
+        data = self.meta_call_fn([{"role": "user", "content": prompt}],
+                                 max_tokens=max_out, task=task)
+        if data:
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            if content and content.strip():
+                return content.strip()
+        return None
+
+    def condense_trace_meta(self, trace: str, task: str = "rescue") -> Optional[str]:
+        try:
+            max_out = int(self.config.get("meta_summary_max_tokens", 512) or 512)
+        except (TypeError, ValueError):
+            max_out = 512
+        budget = self._meta_char_budget(max_out)
+        partials = []
+        for i in range(0, len(trace), budget):
+            condensed = self.condense_chunk(
+                trace[i:i + budget], max_out,
+                part_label=f"{len(partials) + 1}", task=task)
+            if condensed:
+                partials.append(condensed)
+        if not partials:
+            return None
+        if len(partials) == 1:
+            return partials[0]
+        while len(partials) > 1:
+            merged = "\n".join(f"- {p}" for p in partials)
+            if len(merged) <= budget:
+                return self.merge_partials(merged, max_out, task=task) or partials[0]
+            new_partials = []
+            window, size = [], 0
+            for p in partials:
+                cost = len(p) + 3
+                if size + cost > budget and window:
+                    new_partials.append(
+                        self.merge_partials(
+                            "\n".join(f"- {x}" for x in window), max_out, task=task)
+                        or window[0])
+                    window, size = [], 0
+                window.append(p)
+                size += cost
+            if window:
+                new_partials.append(
+                    self.merge_partials(
+                        "\n".join(f"- {x}" for x in window), max_out, task=task)
+                    or window[0])
+            partials = new_partials
+        return partials[0]
+

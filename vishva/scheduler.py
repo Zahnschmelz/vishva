@@ -1,13 +1,12 @@
 import os
-import re
 import json
 import uuid
+import re
 import shutil
 import threading
-import subprocess
-from .paths import p
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Callable
+from .paths import p
 
 VALID_TARGETS = {"telegram", "cli", "gui", "auto"}
 
@@ -410,7 +409,7 @@ class TaskScheduler:
         try:
             self._load()
         except Exception as e:
-            print(f"[Scheduler] reload-failure: {e}")
+            print(f"[Scheduler] reload-failor: {e}")
 
     def get_due_tasks(self) -> List[Dict[str, Any]]:
         self.reload()
@@ -561,13 +560,13 @@ def process_due_tasks(
                 try:
                     pre_chat(task)
                 except Exception as e:
-                    print(f"[Scheduler] pre_chat failure: {e}")
+                    print(f"[Scheduler] pre_chat failor: {e}")
             prep = globals().get("prepare_agent_for_scheduled_task")
             if prep:
                 try:
                     prep(agent, scheduler)
                 except Exception as e:
-                    print(f"[Scheduler] prepare_agent failure: {e}")
+                    print(f"[Scheduler] prepare_agent failor: {e}")
             response = agent.chat(prompt)
             response = response or "(Empty Answer)"
             if current_target == "daemon":

@@ -1,6 +1,6 @@
 import os
 from datetime import datetime
-import sys
+#import sys
 import json
 import random
 import string
@@ -11,12 +11,15 @@ import tempfile
 import re
 from typing import Dict
 from .paths import p, cfg_path
-from .scheduler import TaskScheduler, prepare_agent_for_scheduled_task
+#from .scheduler import TaskScheduler, prepare_agent_for_scheduled_task
+from .scheduler import TaskScheduler
 import queue
 import threading
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, TypeHandler, ApplicationHandlerStop
-from .agent import AgentCore, LANG_TO_EXT
+# from .agent import AgentCore, LANG_TO_EXT
+from .agent import AgentCore
+from .code_manager import LANG_TO_EXT
 import html as html_mod
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackQueryHandler
@@ -594,43 +597,22 @@ async def cmd_ctx(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("❌ Invalid value. Integer expected.")
         return
-    agent.config["context_size"] = ctx_value
+
+    # Nur in Config speichern + Agent direkt aktualisieren (kein Service-Restart)
+    agent.config["context_tokens"] = ctx_value
     agent._save_config()
-    service_path = os.path.expanduser("~/.config/systemd/user/llama-server.service")
-    if os.path.exists(service_path):
-        try:
-            with open(service_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            new_lines = []
-            for line in lines:
-                if re.search(r'^\s*(?:-c|--ctx-size)(?:\s|=)+(\d+)', line):
-                    new_lines.append(re.sub(
-                        r'((?:-c|--ctx-size)(?:\s|=)+)(\d+)',
-                        lambda m: m.group(1) + str(ctx_value), line))
-                else:
-                    new_lines.append(line)
-            with open(service_path, "w", encoding="utf-8") as f:
-                f.write("".join(new_lines))
-        except Exception as e:
-            await update.message.reply_text(f"⚠️ Service file update: {e}")
     agent.context_size = ctx_value
     agent.compression_threshold = agent._calculate_compression_threshold(ctx_value)
-    await update.message.reply_text(f"🔄 Restarting service with ctx-size={ctx_value}...")
-    try:
-        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True, timeout=30)
-        subprocess.run(["systemctl", "--user", "restart", "llama-server"], capture_output=True, text=True, timeout=60)
-        r3 = subprocess.run(["systemctl", "--user", "is-active", "llama-server"], capture_output=True, text=True, timeout=10)
-        status = r3.stdout.strip()
-        if status == "active":
-            await update.message.reply_text(f"✅ Context size set: <code>{ctx_value}</code>", parse_mode="HTML")
-        else:
-            await update.message.reply_text(f"⚠️ Service status: {status}")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Restart failed: {e}")
+
+    await update.message.reply_text(
+        f"✅ Context size set: <code>{ctx_value}</code>\n"
+        f"💾 Saved to config.json and applied to this agent.",
+        parse_mode="HTML")
 
 async def cmd_listtools(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        with open(p("config", "toolpool.txt"), "r", encoding="utf-8") as f:
+        toolpool_path = p("config", "toolpool.json")
+        with open(toolpool_path, "r", encoding="utf-8") as f:
             pool = json.load(f)
         names = []
         for tool in pool:
@@ -641,7 +623,7 @@ async def cmd_listtools(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if names:
             text = "<b>Available tools:</b>\n" + "\n".join([f"• <code>{n}</code>" for n in names])
         else:
-            text = "No tools found in toolpool.txt."
+            text = "No tools found in toolpool.json."
         await update.message.reply_text(text, parse_mode="HTML")
     except Exception as e:
         await update.message.reply_text(f"❌ Error in /listtools: {type(e).__name__}: {str(e)[:200]}")
@@ -730,13 +712,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     b64_url = agent._process_image(img_path)
     if b64_url:
         caption = update.message.caption or "Describe this image."
-        history = agent.session_manager.load_session(agent.get_session_id())
-        history.append({
-            "role": "user",
-            "content": [
-                {"type": "text", "text": caption},
-                {"type": "image_url", "image_url": {"url": b64_url}}]})
-        agent.session_manager.save_session(agent.get_session_id(), history)
         try:
             response = await asyncio.to_thread(agent.chat, caption, b64_url)
             await split_and_send(update, response)

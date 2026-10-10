@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 import json
-import time
-import threading
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Set
+#import time
+#import threading
+#from datetime import datetime
+from rich.console import Console
+#from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
 try:
     import requests
 except ImportError:
     requests = None
+
+console = Console(soft_wrap=True)
 
 class MetaModelClient:
     def __init__(self, config: dict):
@@ -90,8 +94,6 @@ class MetaModelClient:
             if content is not None:
                 return content
         if self.fallback_enabled and self.main_url and self.main_model:
-            if self.url:
-                print("[BackgroundAgent] Meta-Modell fehlgeschlagen → Fallback auf Hauptmodell")
             return self._request(
                 base_url=self.main_url,
                 model=self.main_model,
@@ -139,5 +141,5 @@ class MetaModelClient:
                            or msg.get("thinking", "") or "").strip()
             return content if content else None
         except Exception as e:
-            print(f"[BackgroundAgent] {label or 'model'} request error: {e}")
+            console.print(f"[BackgroundAgent] {label or 'model'} request error: {e}")
             return None

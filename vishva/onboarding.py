@@ -17,7 +17,8 @@ import sys
 import json
 import re
 from pathlib import Path
-from typing import Dict, List, Optional
+#from typing import Dict, List, Optional
+from typing import Dict, List
 
 HERE = Path(__file__).parent.resolve()
 ROOT = HERE.parent
@@ -140,7 +141,6 @@ Do not include explanations, just the JSON array."""
         # Disable meta-helpers during onboarding
         agent.config["rag_meta_enrichment_enabled"] = False
         agent.config["rag_meta_extraction_enabled"] = False
-        agent.tool_manager.active_tools = set()
         response = agent.chat(prompt).strip()
         json_match = re.search(r'\[.*?\]', response, re.DOTALL)
         if json_match:
@@ -153,21 +153,6 @@ Do not include explanations, just the JSON array."""
         print(f"⚠️  Agent selection failed: {e}")
         return []
 
-
-def _extract_persona_block(response: str) -> str:
-    """Pull the persona template out of the LLM response, robustly."""
-    text = str(response or "")
-    # 1) If a code fence contains the template, use its content
-    fence = re.search(r"```[a-zA-Z]*\s*\n(.*?)```", text, re.DOTALL)
-    if fence and "---SOUL---" in fence.group(1):
-        text = fence.group(1)
-    # 2) Cut everything before the first ---SOUL--- marker
-    idx = text.find("---SOUL---")
-    if idx > 0:
-        text = text[idx:]
-    # 3) Remove leftover fence markers
-    text = text.replace("```", "")
-    return text.strip()
 
 def agent_create_rag_entries(answers: Dict, scan: Dict):
     """Agent creates RAG entries + essentials from structured answers."""
@@ -260,15 +245,22 @@ OUTPUT: Only the merged file content. No explanations, no markdown fences."""
 def agent_merge_snippets(selected_names: List[str], snippets: List[Dict],
                          answers: Dict, installer_tools: List[str]) -> str:
     """LLM merges selected snippets into one coherent persona file."""
-    print("\n🤖 Agent is merging snippets into unified persona...")
+    print("\n Agent is merging snippets into unified persona...")
+
     selected = [s for s in snippets if s["name"] in selected_names]
     if not selected:
         selected = snippets[:3]
 
-    snippets_text = "\n".join([
-        f"### Snippet: {s['name']}\n{s['soul']}\n{s['engine']}"
-        for s in selected])
+    # Build snippets text
+    snippets_text = "\n\n".join([
+        f"### Snippet: {s['name']}\n{s['soul']}\n\n{s['engine']}"
+        for s in selected
+    ])
+
+    # Installer tools
     tools_text = "\n".join(sorted(installer_tools)) if installer_tools else "(none)"
+
+    # User answers
     answers_text = "\n".join([f"- {k}: {v}" for k, v in answers.items()])
 
     prompt = f"""{MERGE_PROMPT}
@@ -288,24 +280,23 @@ Now create the merged persona file."""
         agent = AgentCore(session_id="onboarding_v2_merge", enable_tts=False)
         agent.config["rag_meta_enrichment_enabled"] = False
         agent.config["rag_meta_extraction_enabled"] = False
-        # 🔑 CRITICAL: no tools for the merge — pure text answer required.
-        # Otherwise the model may write_file the persona instead of answering.
-        agent.tool_manager.active_tools = set()
+        response = agent.chat(prompt).strip()
 
-        for attempt in range(2):
-            p = prompt if attempt == 0 else (
-                prompt + "\n\nIMPORTANT: Your previous answer was unusable. "
-                "Respond ONLY with the template, starting with the line "
-                "---SOUL---. No explanations, no code fences, no tools.")
-            raw = agent.chat(p)
-            response = _extract_persona_block(raw)
-            if "---SOUL---" in response and "---ENGINE---" in response:
-                return response + "\n"
-            print(f"⚠️  Merge attempt {attempt + 1} unusable. "
-                  f"Raw response preview: {str(raw)[:300]}")
+        # Clean up: remove markdown fences if present
+        if response.startswith("```"):
+            lines = response.split("\n")
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            response = "\n".join(lines)
 
-        print("⚠️  Merge output missing required sections, using fallback")
-        return _fallback_merge(selected, installer_tools, answers)
+        # Validate structure
+        if "---SOUL---" not in response or "---ENGINE---" not in response:
+            print("⚠️  Merge output missing required sections, using fallback")
+            return _fallback_merge(selected, installer_tools, answers)
+
+        return response + "\n"
     except Exception as e:
         print(f"⚠️  Merge failed: {e}, using fallback")
         return _fallback_merge(selected, installer_tools, answers)

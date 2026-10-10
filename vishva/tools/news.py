@@ -19,11 +19,7 @@ def get_ddgs():
         from ddgs import DDGS
         return DDGS
     except ImportError:
-        try:
-            from duckduckgo_search import DDGS
-            return DDGS
-        except ImportError:
-            return None
+        print("modul ddgs not found... pip install ddgs or something like this")
 
 def fetch_article_text(url, max_chars=1500):
     headers = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'}

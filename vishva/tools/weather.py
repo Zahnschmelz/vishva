@@ -1,28 +1,34 @@
 """Auto-extrahiertes Tool-Modul (aus tool_manager.py)."""
-import os
-import re
+#import os
+#import re
 import json
 import time
-import shutil
-import subprocess
-from typing import Any, Dict, List, Optional, Tuple
-from ..paths import p, cfg_path, BASE_DIR
+#import shutil
+#import subprocess
+#from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict
+#from ..paths import p, cfg_path, BASE_DIR
+
 try:
     import requests
 except ImportError:
     requests = None
 
 def _weather(self, args: Dict[str, Any]) -> Dict[str, Any]:
-    mode = args.get("mode", "today")
+    # FIX: Unterstützt sowohl "period" (Schema) als auch "mode" (Legacy)
+    mode = args.get("period") or args.get("mode", "today")
     if mode not in ("today", "tomorrow", "week"):
-        return {"error": f"Invalid mode: {mode}. Use 'today', 'tomorrow', or 'week'."}
+        return {"error": f"Invalid period: {mode}. Use 'today', 'tomorrow', or 'week'."}
+
     lat = self.config.get("weather_latitude")
     lon = self.config.get("weather_longitude")
     location_name = self.config.get("weather_location_name", "Unknown")
     timezone = self.config.get("weather_timezone", "Europe/Berlin")
+
     if not lat or not lon:
         return {
             "error": "Weather location not configured. Add weather_latitude, weather_longitude, weather_location_name, and weather_timezone to config.json"}
+
     try:
         lat = float(lat)
         lon = float(lon)
@@ -61,6 +67,7 @@ def _weather(self, args: Dict[str, Any]) -> Dict[str, Any]:
             return "Gewitter mit Hagel"
         else:
             return "Unbekannt"
+
     try:
         if mode == "today":
             url = (f"https://api.open-meteo.com/v1/forecast?"
@@ -92,6 +99,7 @@ def _weather(self, args: Dict[str, Any]) -> Dict[str, Any]:
                     "max_temp": max_temp,
                     "min_temp": min_temp,
                     "precipitation_probability": precip_prob}}
+
         elif mode == "tomorrow":
             url = (f"https://api.open-meteo.com/v1/forecast?"
                    f"latitude={lat}&longitude={lon}"
@@ -122,6 +130,7 @@ def _weather(self, args: Dict[str, Any]) -> Dict[str, Any]:
                     "max_temp": max_temp,
                     "min_temp": min_temp,
                     "precipitation_probability": precip_prob}}
+
         elif mode == "week":
             url = (f"https://api.open-meteo.com/v1/forecast?"
                    f"latitude={lat}&longitude={lon}"
@@ -146,6 +155,7 @@ def _weather(self, args: Dict[str, Any]) -> Dict[str, Any]:
                 "location": location_name,
                 "message": f"Wetter WOCHENANSICHT ({location_name}):\n" + "\n".join(table_lines),
                 "data": data["daily"]}
+
     except requests.exceptions.RequestException as e:
         return {"error": f"Network error: {e}"}
     except Exception as e:

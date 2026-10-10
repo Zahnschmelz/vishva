@@ -1,23 +1,24 @@
 """Auto-extrahiertes Tool-Modul (aus tool_manager.py)."""
 import os
-import re
-import json
-import time
-import shutil
-import subprocess
-from typing import Any, Dict, List, Optional, Tuple
+#import re
+#import json
+#import time
+#import shutil
+#import subprocess
+#from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict
 
 def _read_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
     path = self._resolve_path(args.get("path", ""))
     if not path:
         return {"error": "path is required."}
     try:
-        MAX_READ_SIZE = self.config.get("max_read_file_size", 100_000)
+        MAX_READ_BYTES = self.config.get("max_read_file_bytes", 1024)
         size = os.path.getsize(path)
-        if size > MAX_READ_SIZE:
+        if size > MAX_READ_BYTES:
             with open(path, "r", encoding="utf-8") as f:
                 head = "".join(f.readline() for _ in range(100))
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
                 f.seek(max(0, size - 5000))
                 tail = f.read()
             return {

@@ -2,6 +2,7 @@ import os
 import io
 import re
 import sys
+import copy
 import time
 import json
 import string
@@ -16,6 +17,7 @@ import subprocess
 from rich.panel import Panel
 from rich.markup import escape
 from .paths import p, cfg_path
+#from .paths import p
 from rich.console import Console
 from rich.markdown import Markdown
 from .tool_manager import ToolManager
@@ -24,7 +26,10 @@ from prompt_toolkit import PromptSession
 from .session_manager import SessionManager
 from prompt_toolkit.formatted_text import HTML
 from .tts_manager import TTSManager as TTSManager
-from typing import Dict, List, Any, Optional, Callable
+#from .code_manager import CodeManager, CODE_BLOCK_RE, LANG_TO_EXT
+from .code_manager import CodeManager, CODE_BLOCK_RE
+#from typing import Dict, List, Any, Optional, Callable
+from typing import Dict, List, Any, Optional
 from .scheduler import TaskScheduler, process_due_tasks
 from prompt_toolkit.completion import Completer, Completion
 
@@ -35,62 +40,44 @@ os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("TQDM_DISABLE", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-CODE_BLOCK_RE = re.compile(
-    r"^[ \t]*```([\w+-]*)[ \t]*\r?\n"
-    r"(.*?)"
-    r"\n?[ \t]*```[ \t]*$",
-    re.DOTALL | re.MULTILINE)
-
-LANG_TO_EXT = {
-    "python": ".py", "py": ".py",
-    "bash": ".sh", "sh": ".sh", "shell": ".sh", "zsh": ".sh",
-    "javascript": ".js", "js": ".js", "node": ".js",
-    "typescript": ".ts", "ts": ".ts",
-    "json": ".json", "jsonl": ".jsonl", "json5": ".json5", "jsonc": ".jsonc",
-    "yaml": ".yaml", "yml": ".yaml", "toml": ".toml", "ini": ".ini",
-    "xml": ".xml", "html": ".html", "css": ".css", "sql": ".sql",
-    "markdown": ".md", "md": ".md", "txt": ".txt", "text": ".txt",
-    "c": ".c", "h": ".h", "cpp": ".cpp", "c++": ".cpp", "java": ".java",
-    "rust": ".rs", "go": ".go", "ruby": ".rb", "php": ".php",
-    "dockerfile": ".dockerfile", "makefile": ".makefile",}
-
 console = Console()
 
-def _play_notification_sound():
-    for fname in ("alarm.mp3", "alarm.wav"):
-        fpath = p("assets", "sounds", fname)
-        if os.path.exists(fpath):
-            for player in ("paplay", "aplay", "ffplay"):
-                if shutil.which(player):
-                    cmd = [player, fpath] if player != "ffplay" else \
-                          ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", fpath]
-                    try:
-                        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        return
-                    except Exception:
-                        pass
-    return
+# def _play_notification_sound():
+#     for fname in ("alarm.mp3", "alarm.wav"):
+#         fpath = p("assets", "sounds", fname)
+#         if os.path.exists(fpath):
+#             for player in ("paplay", "aplay", "ffplay"):
+#                 if shutil.which(player):
+#                     cmd = [player, fpath] if player != "ffplay" else \
+#                           ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", fpath]
+#                     try:
+#                         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+#                         return
+#                     except Exception:
+#                         pass
+#     return
 
-class CommandCompleter(Completer):
-    def get_completions(self, document, complete_event):
-        text = document.text
-        if not text.startswith('/'):
-            return
-        commands = [
-            '/exit', '/bye', '/new', '/session', '/clear', '/history',
-            '/tokens', '/config', '/voice', '/info', '/zip', '/shrink',
-            '/listtools', '/offloading', '/sched',
-            '/sound', '/showThinking', '/image', '/help', '/threshold',
-            '/stt', '/personality', '/persona', '/frame', '/context']
-        for cmd in commands:
-            if cmd.startswith(text):
-                yield Completion(cmd, start_position=-len(text))
+# class CommandCompleter(Completer):
+#     def get_completions(self, document, complete_event):
+#         text = document.text
+#         if not text.startswith('/'):
+#             return
+#         commands = [
+#             '/exit', '/bye', '/new', '/session', '/clear', '/history',
+#             '/tokens', '/config', '/voice', '/info', '/zip', '/shrink',
+#             '/listtools', '/offloading', '/sched',
+#             '/sound', '/showThinking', '/image', '/help', '/threshold',
+#             '/stt', '/personality', '/persona', '/frame', '/context']
+#         for cmd in commands:
+#             if cmd.startswith(text):
+#                 yield Completion(cmd, start_position=-len(text))
 
 class AgentCore:
     def __init__(self, session_id=None, config_path: str = None, notifier=None, enable_tts: bool = False, telegram_mode: bool = False):
         self.config_path = config_path or p("config", "config.json")
         self.config = self._load_config()
         self.session_manager = SessionManager(self.config_path)
+        self.session_manager.meta_call_fn = self._call_meta_api
         self.notifier = notifier
         self.notifications: List[str] = []
         self.base_url = self.config.get("base_url", "http://localhost:8080/v1")
@@ -111,7 +98,11 @@ class AgentCore:
         self.tool_manager.agent_ref = self
         self.tool_manager.set_confirm_handler(self._confirm_tool_cli)
         self._code_save_handler = None
-        self.set_code_save_handler(self._cli_code_save_handler)
+        self.code_manager = CodeManager(
+            self.config,
+            debug_level_fn=self._debug_level,
+            log_fn=lambda msg: console.print(msg))
+        self.code_manager.set_handler(self._cli_code_save_handler)
         self.rag_manager = None
         if self.config.get("rag_enabled", False):
             try:
@@ -237,54 +228,6 @@ class AgentCore:
             self.config.get("meta_api_key", self.config.get("api_key", "llama")),
             int(self.config.get("meta_model_timeout", 45) or 45),)
 
-    def set_code_save_handler(self, fn):
-        self._code_save_handler = fn
-
-    def _extract_code_blocks(self, text: str) -> List[Dict[str, str]]:
-        return [{"lang": (m.group(1) or "text").lower().strip(),
-                 "code": m.group(2)}
-                for m in CODE_BLOCK_RE.finditer(text)]
-
-    def _default_code_filename(self, blocks: List[Dict]) -> str:
-        lang = blocks[0]["lang"] if blocks else "text"
-        ext = LANG_TO_EXT.get(lang, ".txt")
-        rand_str = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
-        return f"snippet_{rand_str}{ext}"
-
-    def _save_code_to_file(self, blocks: List[Dict], filename: str) -> Optional[str]:
-        code_dir = cfg_path(self.config, "code_to_file_dir", "data/code_snippets")
-        os.makedirs(code_dir, exist_ok=True)
-        safe = os.path.basename(filename or "").strip()
-        safe = re.sub(r"[^A-Za-z0-9._-]", "_", safe)
-        if not safe:
-            safe = self._default_code_filename(blocks)
-        if not os.path.splitext(safe)[1]:
-            safe += LANG_TO_EXT.get(blocks[0]["lang"], ".txt")
-        base, ext = os.path.splitext(safe)
-        candidate = os.path.join(code_dir, safe)
-        i = 1
-        while os.path.exists(candidate):
-            candidate = os.path.join(code_dir, f"{base}_{i}{ext}")
-            i += 1
-        try:
-            with open(candidate, "w", encoding="utf-8") as f:
-                if len(blocks) == 1:
-                    f.write(blocks[0]["code"])
-                    if not blocks[0]["code"].endswith("\n"):
-                        f.write("\n")
-                else:
-                    for idx, block in enumerate(blocks, 1):
-                        f.write(f"# --- Block {idx} ({block['lang']}) ---\n")
-                        f.write(block["code"])
-                        if not block["code"].endswith("\n"):
-                            f.write("\n")
-                        f.write("\n")
-            return candidate
-        except Exception as e:
-            if self._debug_level() >= 1:
-                print(f"[CodeSave] Write failed: {e}")
-            return None
-
     def _cli_code_save_handler(self, block: Dict, idx: int, total: int) -> Optional[Dict]:
         try:
             if not sys.stdin.isatty():
@@ -296,8 +239,8 @@ class AgentCore:
         default = self._default_code_filename([block])
         self._pause_spinner()
         try:
-            print(f"\n💾 Code block {idx}/{total} ({lang}, ~{lines} lines)")
-            print(f"   Default filename: {default}")
+            console.print(f"\n💾 Code block {idx}/{total} ({lang}, ~{lines} lines)")
+            console.print(f"   Default filename: {default}")
             try:
                 ans = input("   (Y)es / (n)o / (c)ustom / (s)kip all: ").strip().lower()
             except (EOFError, KeyboardInterrupt):
@@ -316,83 +259,28 @@ class AgentCore:
         finally:
             self._resume_spinner()
 
-    def _maybe_save_code(self, response: str) -> List[str]:
-        if not bool(self.config.get("code_to_file_enabled", False)):
-            return []
-        if not self._code_save_handler:
-            return []
-        blocks = self._extract_code_blocks(response)
-        if not blocks:
-            return []
-        min_lines = int(self.config.get("code_to_file_min_lines", 5) or 5)
-        eligible = [b for b in blocks if b["code"].count("\n") + 1 >= min_lines]
-        if not eligible:
-            return []
-        saved = []
-        for idx, block in enumerate(eligible, 1):
-            try:
-                result = self._code_save_handler(block, idx, len(eligible))
-            except Exception as e:
-                if self._debug_level() >= 1:
-                    print(f"[CodeSave] Handler error: {e}")
-                continue
-            if not result:
-                continue
-            if result.get("skip_all"):
-                break
-            if not result.get("save"):
-                continue
-            filename = result.get("filename") or self._default_code_filename([block])
-            path = self._save_code_to_file([block], filename)
-            if path:
-                entry = {"path": path, "validation": None}
-                if bool(self.config.get("code_to_file_validate", True)):
-                    entry["validation"] = self._validate_code_file(path)
-                    v = entry["validation"]
-                    if v["checked"] and not v["ok"] and self._debug_level() >= 1:
-                        print(f"[CodeSave] ❌ {path}: {v['error']}")
-                saved.append(entry)
-        return saved
+
+    def set_code_save_handler(self, fn):
+        self.code_manager.set_handler(fn)
+
+    def _default_code_filename(self, blocks: List[Dict]) -> str:
+        return self.code_manager.default_code_filename(blocks)
+
+    def _maybe_save_code(self, response: str) -> List[Dict[str, Any]]:
+        return self.code_manager.maybe_save(response)
+
+    def _build_code_fix_prompt(self, failed: List[Dict[str, Any]]) -> str:
+        return self.code_manager.build_fix_prompt(failed)
+
+    def _condense_trace_meta(self, trace: str, task: str = "rescue"):
+        return SessionManager.condense_trace_meta(trace)
 
     @staticmethod
     def _repair_args_string(s) -> str:
-        if not isinstance(s, str):
-            s = json.dumps(s, ensure_ascii=False)
-        try:
-            json.loads(s)
-            return s
-        except Exception:
-            pass
-        repaired = s.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
-        try:
-            json.loads(repaired)
-            return repaired
-        except Exception:
-            pass
-        out = []
-        for ch in s:
-            out.append("\\u%04x" % ord(ch) if ord(ch) < 0x20 else ch)
-        repaired2 = "".join(out)
-        try:
-            json.loads(repaired2)
-            return repaired2
-        except Exception:
-            return "{}"
+        return SessionManager.repair_args_string(s)
 
     def _sanitize_history_tool_calls(self, history) -> bool:
-        changed = False
-        for msg in history:
-            tcs = msg.get("tool_calls")
-            if not tcs:
-                continue
-            for tc in tcs:
-                func = tc.get("function", {})
-                args = func.get("arguments", "{}")
-                fixed = self._repair_args_string(args)
-                if fixed != args:
-                    func["arguments"] = fixed
-                    changed = True
-        return changed
+        return self.session_manager.sanitize_history_tool_calls(history)
 
     @staticmethod
     def _strip_tool_history(messages):
@@ -407,91 +295,6 @@ class AgentCore:
                 m["content"] = (content + "\n[tool calls removed]").strip() if content else "[tool calls removed]"
             out.append(m)
         return out
-
-    def _validate_code_file(self, path: str) -> Dict[str, Any]:
-        ext = os.path.splitext(path)[1].lower()
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                content = f.read()
-        except Exception:
-            return {"checked": False, "ok": True, "error": None}
-        if ext == ".py":
-            try:
-                import ast
-                ast.parse(content)
-                return {"checked": True, "ok": True, "error": None}
-            except SyntaxError as e:
-                return {"checked": True, "ok": False,
-                        "error": f"SyntaxError line {e.lineno}: {e.msg}"}
-        if ext == ".sh":
-            try:
-                r = subprocess.run(["bash", "-n", path],
-                                   capture_output=True, text=True, timeout=10)
-                if r.returncode == 0:
-                    return {"checked": True, "ok": True, "error": None}
-                return {"checked": True, "ok": False,
-                        "error": (r.stderr or "").strip()[:500]}
-            except Exception as e:
-                return {"checked": False, "ok": True, "error": None}
-        if ext == ".json":
-            try:
-                json.loads(content)
-                return {"checked": True, "ok": True, "error": None}
-            except Exception as e:
-                return {"checked": True, "ok": False, "error": str(e)[:500]}
-        if ext == ".jsonl":
-            for i, line in enumerate(content.splitlines(), 1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    json.loads(line)
-                except Exception as e:
-                    return {"checked": True, "ok": False,
-                            "error": f"Line {i}: {str(e)[:300]}"}
-            return {"checked": True, "ok": True, "error": None}
-        if ext in (".yaml", ".yml"):
-            try:
-                import yaml
-            except ImportError:
-                return {"checked": False, "ok": True, "error": None}
-            try:
-                yaml.safe_load(content)
-                return {"checked": True, "ok": True, "error": None}
-            except Exception as e:
-                return {"checked": True, "ok": False, "error": str(e)[:500]}
-        if ext == ".js" and shutil.which("node"):
-            try:
-                r = subprocess.run(["node", "--check", path],
-                                   capture_output=True, text=True, timeout=10)
-                if r.returncode == 0:
-                    return {"checked": True, "ok": True, "error": None}
-                return {"checked": True, "ok": False,
-                        "error": (r.stderr or "").strip()[:500]}
-            except Exception:
-                return {"checked": False, "ok": True, "error": None}
-        return {"checked": False, "ok": True, "error": None}
-
-    def _build_code_fix_prompt(self, failed: List[Dict[str, Any]]) -> str:
-        parts = []
-        for entry in failed:
-            path = entry["path"]
-            err = entry["validation"]["error"]
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    content = f.read()[:4000]
-            except Exception:
-                content = "(nicht lesbar)"
-            parts.append(
-                f"### File: {path}\n"
-                f"Check-Error: {err}\n"
-                f"Current content:\n```\n{content}\n```")
-        return (
-            "AUTO-FIX: The following saved code file(s) FAILED the syntax check.\n"
-            "Analyze the error, fix the code, and write the corrected version "
-            "back to the SAME path using write_file.\n"
-            "Do not explain at length — just fix and save.\n\n"
-            + "\n\n".join(parts))
 
     def _seed_bounds(self):
         try:
@@ -526,28 +329,38 @@ class AgentCore:
 
     def _get_seed(self) -> int:
         mode = str(self.config.get("seed_mode", "random")).lower()
-        if mode == "fixed":
-            return self._read_or_create_seed_file(p("data", ".seed"))
-        if mode == "session":
-            sid = self.get_session_id() or "default"
-            return self._read_or_create_seed_file(p("data", f".{sid}.seed"))
-        return self._new_seed()
-
-    def reroll_seed(self) -> int:
-        mode = str(self.config.get("seed_mode", "random")).lower()
-        if mode == "fixed":
-            path = p("data", ".seed")
-        elif mode == "session":
-            sid = self.get_session_id() or "default"
-            path = p("data", f".{sid}.seed")
-        else:
+        path = self._seed_path(mode)
+        if path is None:
             return self._new_seed()
+        return self._read_or_create_seed_file(path)
+
+    def _seed_dir(self) -> str:
+        seed_dir = p("data", "seeds")
         try:
-            if os.path.exists(path):
-                os.remove(path)
+            os.makedirs(seed_dir, exist_ok=True)
         except Exception:
             pass
-        return self._read_or_create_seed_file(path)
+        return seed_dir
+
+    def _seed_path(self, mode: str):
+        if mode == "fixed":
+            return os.path.join(self._seed_dir(), "fixed.seed")
+        if mode == "session":
+            sid = self.get_session_id() or "default"
+            return os.path.join(self._seed_dir(), f"{sid}.seed")
+        return None
+
+    # def reroll_seed(self) -> int:
+    #     mode = str(self.config.get("seed_mode", "random")).lower()
+    #     path = self._seed_path(mode)
+    #     if path is None:
+    #         return self._new_seed()
+    #     try:
+    #         if os.path.exists(path):
+    #             os.remove(path)
+    #     except Exception:
+    #         pass
+    #     return self._read_or_create_seed_file(path)
 
     def _bg_rag_extract(self, user_message, assistant_answer, prev_user_msg, prev_asst_msg):
         try:
@@ -581,30 +394,42 @@ class AgentCore:
             console.print(Markdown(text))
 
     def _add_continuation_marker(self, session_id: str):
-        history = self.session_manager.load_session(session_id)
-        if not history or len(history) <= 1:
-            return
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        marker_text = (
-            f"[SYSTEM NOTE / SESSION_CONTINUED: {now}] "
-            "Note: Time has passed since the last interaction. "
-            "This is a continuation of a previous conversation.")
-        last_msg = history[-1]
-        last_content = str(last_msg.get("content", ""))
-        if "[SESSION_CONTINUED:" in last_content:
-            history[-1]["content"] = marker_text
-            history[-1]["role"] = "user"
-        else:
-            history.append({
-                "role": "user",
-                "content": marker_text})
-        self.session_manager.save_session(session_id, history)
+        self.session_manager.add_continuation_marker(session_id)
+
+    _KEY_MIGRATION = {
+        "max_read_file_size": "max_read_file_chars",
+        "max_tool_args_length": "max_tool_args_chars",
+        "max_tool_result_length": "max_tool_result_chars",
+        "read_cache_chunk_size": "read_cache_chunk_chars",
+        "tool_log_args_length": "tool_log_args_chars",
+        "tool_log_args_per_min": "tool_log_args_min_chars",
+        "rag_auto_extract_min_length": "rag_auto_extract_min_chars",
+        "context_size": "context_tokens",
+        "meta_context_size": "meta_context_tokens",
+    }
+
+    @classmethod
+    def _migrate_config_keys(cls, config: Dict[str, Any]) -> bool:
+        changed = False
+        for old, new in cls._KEY_MIGRATION.items():
+            if old in config and new not in config:
+                config[new] = config.pop(old)
+                changed = True
+        return changed
 
     def _load_config(self) -> Dict[str, Any]:
         if os.path.exists(self.config_path):
             with open(self.config_path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                config = json.load(f)
+            if self._migrate_config_keys(config):
+                try:
+                    with open(self.config_path, "w", encoding="utf-8") as f:
+                        json.dump(config, f, indent=2, ensure_ascii=False)
+                except Exception:
+                    pass
+            return config
         return {}
+
 
     def _save_config(self):
         with open(self.config_path, "w", encoding="utf-8") as f:
@@ -619,7 +444,7 @@ class AgentCore:
 
     def _load_context_size(self) -> int:
         try:
-            ctx = int(self.config.get("context_size", 16384) or 16384)
+            ctx = int(self.config.get("context_tokens", self.config.get("context_size", 16384)) or 16384)
             return ctx if ctx >= 1024 else 16384
         except (TypeError, ValueError):
             return 16384
@@ -638,6 +463,9 @@ class AgentCore:
             parts.append(self.soul)
         if self.engine_raw:
             engine = self.engine_raw
+            engine = engine.replace(
+                "{agent_workdir}",
+                self.config.get("agent_workdir", "working_dir"))
             if engine:
                 parts.append(engine)
         return "\n\n".join(parts)
@@ -876,42 +704,66 @@ class AgentCore:
                         self._code_fix_active = False
         return response
 
-    @staticmethod
-    def _arg_is_path_like(key: str, value: Any) -> bool:
-        if not isinstance(value, str):
-            return False
-        k = str(key).lower()
-        if any(t in k for t in ("path", "file", "dir", "folder", "target", "dest", "source", "src")):
-            return True
-        return ("/" in value) or ("\\" in value)
+    # @staticmethod
+    # def _arg_is_path_like(key: str, value: Any) -> bool:
+    #     if not isinstance(value, str):
+    #         return False
+    #     k = str(key).lower()
+    #     if any(t in k for t in ("path", "file", "dir", "folder", "target", "dest", "source", "src")):
+    #         return True
+    #     return ("/" in value) or ("\\" in value)
+    #
+    # @staticmethod
+    # def _truncate_preview(value: Any, budget: int, path_like: bool) -> str:
+    #     s = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    #     budget = max(budget, 8)
+    #     marker = "(...)"
+    #     if len(s) <= budget:
+    #         return s
+    #     keep = budget - len(marker)
+    #     if path_like:
+    #         return marker + s[-keep:]
+    #     return s[:keep] + marker
+    #
+    # def _format_args_preview(self, args) -> str:
+    #     total = int(self.config.get("tool_log_args_chars", 120) or 120)
+    #     if not isinstance(args, dict):
+    #         s = json.dumps(args, ensure_ascii=False, default=str)
+    #         return s[:total] + "(...)" if len(s) > total else s
+    #     if not args:
+    #         return ""
+    #     per_min = int(self.config.get("tool_log_args_min_chars", 18) or 18)
+    #     items = list(args.items())
+    #     per = max(per_min, total // len(items))
+    #     parts = []
+    #     for key, value in items:
+    #         path_like = self._arg_is_path_like(key, value)
+    #         parts.append(f"{key}: '{self._truncate_preview(value, per, path_like)}'")
+    #     return " ".join(parts)
+    #
+    # def get_active_tools_info(self) -> List[Dict[str, Any]]:
+    #     tools = []
+    #     for tool in self.tool_manager.available_tools:
+    #         func = tool.get("function", {})
+    #         tools.append({
+    #             "name": func.get("name", ""),
+    #             "description": func.get("description", ""),
+    #             "active": func.get("name", "") in self.tool_manager.active_tools})
+    #     return tools
 
     @staticmethod
-    def _truncate_preview(value: Any, budget: int, path_like: bool) -> str:
-        s = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
-        budget = max(budget, 8)
-        marker = "(...)"
-        if len(s) <= budget:
-            return s
-        keep = budget - len(marker)
-        if path_like:
-            return marker + s[-keep:]
-        return s[:keep] + marker
+    def _arg_is_path_like(key: str, value) -> bool:
+        return ToolManager._arg_is_path_like(key, value)
+
+    @staticmethod
+    def _truncate_preview(value, budget: int, path_like: bool) -> str:
+        return ToolManager._truncate_preview(value, budget, path_like)
 
     def _format_args_preview(self, args) -> str:
-        total = int(self.config.get("tool_log_args_length", 120) or 120)
-        if not isinstance(args, dict):
-            s = json.dumps(args, ensure_ascii=False, default=str)
-            return s[:total] + "(...)" if len(s) > total else s
-        if not args:
-            return ""
-        per_min = int(self.config.get("tool_log_args_per_min", 18) or 18)
-        items = list(args.items())
-        per = max(per_min, total // len(items))
-        parts = []
-        for key, value in items:
-            path_like = self._arg_is_path_like(key, value)
-            parts.append(f"{key}: '{self._truncate_preview(value, per, path_like)}'")
-        return " ".join(parts)
+        return self.tool_manager.format_args_preview(args)
+
+    def get_active_tools_info(self) -> List[Dict[str, Any]]:
+        return self.tool_manager.get_active_tools_info()
 
     def _chat_impl(self, user_message: str, image_b64: Optional[str] = None) -> str:
         history = self.session_manager.load_session(self.session_id)
@@ -1049,7 +901,7 @@ class AgentCore:
             tool_turns += 1
             api_messages = self._inject_budget(api_messages, tool_turns, max_tool_turns, tokens_now)
             api_messages = self._inject_tool_budget(api_messages, tool_turns, max_tool_turns)
-            self._last_api_messages = [dict(m) for m in api_messages]
+            self._last_api_messages = copy.deepcopy(api_messages)
             self._last_api_tools = tools
             self._last_api_turn = tool_turns
             start_time = time.time()
@@ -1110,7 +962,6 @@ class AgentCore:
                 content = reasoning
                 reasoning = ""
             if not content.strip() and not tool_calls:
-                # --- Thinking-Block retten & ausgeben, BEVOR der Fehler kommt ---
                 thinking_raw = (
                     reasoning
                     or assistant_msg.get("reasoning", "")
@@ -1118,7 +969,6 @@ class AgentCore:
                     or assistant_msg.get("thinking", "")
                     or ""
                 ).strip()
-                # Fall: Thinking steckt als Tags im Content und wurde nie separiert
                 if not thinking_raw and content.strip():
                     if not self._strip_thinking(content).strip():
                         thinking_raw = content.strip()
@@ -1161,7 +1011,9 @@ class AgentCore:
                     history = self.session_manager.load_session(self.session_id)
                     expanded_check = list(history)
                     session_tokens = self.session_manager.get_total_tokens(self.session_id, self.system_prompt, tools, override_history=expanded_check)
-                history = self.session_manager.compress_history_pointers(self.session_id, history, self.offloading_enabled)
+                history = self.session_manager.compress_history_pointers(
+                    self.session_id, history, self.offloading_enabled,
+                    skip_last_tool_results=0)
                 history = self.session_manager.apply_tool_ttl(history)
                 self.session_manager.save_session(self.session_id, history)
                 try:
@@ -1204,7 +1056,7 @@ class AgentCore:
                     self._print_answer(display)
                     console.print()
             memory_tools_used = False
-            round_max_res = self.config.get("max_tool_result_length", 3000)
+            round_max_res = self.config.get("max_tool_result_chars", 1000)
             if self.config.get("loop_adaptive_cap", True) and tokens_now and tokens_now > int(self.context_size * 0.6):
                 round_max_res = max(1200, round_max_res // 2)
             for tc in tool_calls:
@@ -1247,40 +1099,36 @@ class AgentCore:
                     self._notify(log_msg)
                     result = self.tool_manager.execute_tool(name, args)
                     result_str = json.dumps(result, ensure_ascii=False, default=str)
-                    MAX_RES = round_max_res
-                    if len(result_str) > MAX_RES:
+                    if self.offloading_enabled:
                         sm = self.session_manager
-                        hint = "\n[... truncated]"
-                        cached = False
-                        n_chunks = 0
-                        if self.offloading_enabled:
-                            entry = sm._load_cache_entry(self.session_id, tc_id) or {}
-                            entry.update({"name": name, "arguments": func.get("arguments", "{}"), "result": result_str})
-                            n_chunks = sm.save_chunked_cache(
-                                self.session_id, tc_id, entry,
-                                chunk_size=self.config.get("read_cache_chunk_size", 2500))
-                            cached = True
-                            if n_chunks:
-                                hint = (f"\n[... truncated ({n_chunks} chunks), use read_cache with path={sm._cache_file(self.session_id, tc_id)} and chunk=0..{n_chunks - 1}]")
-                            else:
-                                hint = f"\n[... truncated, use read_cache with path={sm._cache_file(self.session_id, tc_id)} for full output]"
+                        entry = sm._load_cache_entry(self.session_id, tc_id) or {}
+                        entry.update({
+                            "name": name,
+                            "arguments": func.get("arguments", "{}"),
+                            "result": result_str})
+                        n_chunks = sm.save_chunked_cache(
+                            self.session_id, tc_id, entry,
+                            chunk_size=self.config.get("read_cache_chunk_chars", 1000))
                         dbg = self._debug_level()
                         if dbg == 1:
-                            console.print("✂️")
+                            console.print("💾")
                         elif dbg == 2:
-                            cache_info = (f" | Cache: {sm._cache_file(self.session_id, tc_id)} ({n_chunks} chunks)" if cached else " | no cache (offloading off)")
-                            console.print(f"[dim red]DEBUG ✂️ {name}: {len(result_str)} → {MAX_RES} Zeichen{cache_info}[/dim red]")
-                        result_str = result_str[:MAX_RES] + hint
+                            console.print(
+                                f"[dim red]DEBUG 💾 {name}: {len(result_str)} chars "
+                                f"→ {n_chunks} chunks cached[/dim red]")
                     history.append({
                         "role": "tool",
                         "tool_call_id": tc_id,
                         "name": name,
                         "content": result_str})
                     self.session_manager.save_session(self.session_id, history)
-            if self.offloading_enabled:
+            min_turns = int(self.config.get("offloading_min_tool_turns", 0) or 0)
+            if self.offloading_enabled and tool_turns > min_turns:
                 history = self.session_manager.compress_history_pointers(
-                    self.session_id, history, self.offloading_enabled)
+                    self.session_id, history, self.offloading_enabled,
+                    skip_last_tool_results=len(tool_calls))
                 self.session_manager.save_session(self.session_id, history)
+                history = self.session_manager.load_session(self.session_id)
             send_image_markers = []
             for tc in tool_calls:
                 if tc.get("type") == "function":
@@ -1366,77 +1214,19 @@ class AgentCore:
                 console.print(f"[dim red]Meta-API ({label or 'model'}) Fehler: {e}[/dim red]")
             return None
 
+    def _extract_tool_trace(self, history: List[Dict[str, Any]]) -> str:
+        return self.session_manager.extract_tool_trace(history)
+
+    def _last_tool_pairs(self, history: List[Dict[str, Any]], keep: int) -> List[Dict[str, Any]]:
+        return self.session_manager.last_tool_pairs(history, keep)
+
     @staticmethod
     def _tool_result_status(res_raw: str) -> str:
-        try:
-            res = json.loads(res_raw)
-        except Exception:
-            return (res_raw[:100] or "No results")
-        if isinstance(res, dict):
-            if res.get("error"):
-                return f"ERROR: {str(res['error'])[:100]}"
-            ok = res.get("success", res.get("status", ""))
-            extra = f" rc={res['returncode']}" if "returncode" in res else ""
-            msg = str(res.get("message") or res.get("output") or "")[:100]
-            return f"{'ok' if ok else '?'}{extra} {msg}".strip()
-        return res_raw[:100]
-
-    def _extract_tool_trace(self, history: List[Dict[str, Any]]) -> str:
-        start = 0
-        for i in range(len(history) - 1, -1, -1):
-            if history[i].get("role") == "user":
-                start = i + 1
-                break
-        tool_results = {}
-        for m in history[start:]:
-            if m.get("role") == "tool":
-                tool_results[m.get("tool_call_id", "")] = m.get("content", "")
-        lines = []
-        for m in history[start:]:
-            if m.get("role") != "assistant" or not m.get("tool_calls"):
-                continue
-            for tc in m.get("tool_calls", []):
-                if tc.get("type") != "function":
-                    continue
-                func = tc.get("function", {})
-                name = func.get("name", "?")
-                try:
-                    args = json.loads(func.get("arguments", "{}"))
-                except Exception:
-                    args = {}
-                args_prev = json.dumps(args, ensure_ascii=False)[:80]
-                status = self._tool_result_status(tool_results.get(tc.get("id", ""), ""))
-                lines.append(f"- {name}({args_prev}): {status}")
-        return "\n".join(lines) if lines else "(keine Tool-Calls)"
-
-    @staticmethod
-    def _last_tool_pairs(history: List[Dict[str, Any]], keep: int) -> List[Dict[str, Any]]:
-        if keep <= 0:
-            return []
-        tail: List[Dict[str, Any]] = []
-        i = len(history) - 1
-        groups = 0
-        while i >= 0 and groups < keep:
-            if history[i].get("role") == "tool":
-                j = i
-                while j >= 0 and history[j].get("role") == "tool":
-                    j -= 1
-                if j >= 0 and history[j].get("role") == "assistant" and history[j].get("tool_calls"):
-                    tail = history[j:i + 1] + tail
-                    groups += 1
-                    i = j - 1
-                else:
-                    i -= 1
-            else:
-                i -= 1
-        return tail
+        return SessionManager._tool_result_status(res_raw)
 
     def _meta_char_budget(self, max_out_tokens: int, task: str = "meta") -> int:
         try:
-            if self._meta_endpoint(task)[0] == str(self.config.get("base_url", "")).rstrip("/"):
-                meta_ctx = int(self.config.get("context_size", 4096) or 4096)
-            else:
-                meta_ctx = int(self.config.get("meta_context_size", 4096) or 4096)
+            meta_ctx = int(self.config.get("meta_context_tokens", self.config.get("meta_context_size", 4096)) or 4096)
         except (TypeError, ValueError):
             meta_ctx = 4096
         instruction_tokens = 150
@@ -1470,80 +1260,50 @@ class AgentCore:
                 return content.strip()
         return None
 
-    def _condense_trace_meta(self, trace: str, task: str = "rescue") -> Optional[str]:
-        try:
-            max_out = int(self.config.get("meta_summary_max_tokens", 512) or 512)
-        except (TypeError, ValueError):
-            max_out = 300
-        budget = self._meta_char_budget(max_out, task=task)
-        partials = []
-        for i in range(0, len(trace), budget):
-            condensed = self._condense_chunk(
-                trace[i:i + budget], max_out,
-                part_label=f"{len(partials) + 1}",
-                task=task)
-            if condensed:
-                partials.append(condensed)
-        if not partials:
-            return None
-        if len(partials) == 1:
-            return partials[0]
-        while len(partials) > 1:
-            merged = "\n".join(f"- {p}" for p in partials)
-            if len(merged) <= budget:
-                return self._merge_partials(merged, max_out, task=task) or partials[0]
-            new_partials = []
-            window, size = [], 0
-            for p in partials:
-                cost = len(p) + 3
-                if size + cost > budget and window:
-                    new_partials.append(
-                        self._merge_partials(
-                            "\n".join(f"- {x}" for x in window), max_out)
-                        or window[0])
-                    window, size = [], 0
-                window.append(p)
-                size += cost
-            if window:
-                new_partials.append(self._merge_partials("\n".join(f"- {x}" for x in window), max_out, task=task) or window[0])
-            partials = new_partials
-        return partials[0]
+    # def _condense_trace_meta(self, trace: str, task: str = "rescue") -> Optional[str]:
+    #     try:
+    #         max_out = int(self.config.get("meta_summary_max_tokens", 512) or 512)
+    #     except (TypeError, ValueError):
+    #         max_out = 300
+    #     budget = self._meta_char_budget(max_out, task=task)
+    #     partials = []
+    #     for i in range(0, len(trace), budget):
+    #         condensed = self._condense_chunk(
+    #             trace[i:i + budget], max_out,
+    #             part_label=f"{len(partials) + 1}",
+    #             task=task)
+    #         if condensed:
+    #             partials.append(condensed)
+    #     if not partials:
+    #         return None
+    #     if len(partials) == 1:
+    #         return partials[0]
+    #     while len(partials) > 1:
+    #         merged = "\n".join(f"- {p}" for p in partials)
+    #         if len(merged) <= budget:
+    #             return self._merge_partials(merged, max_out, task=task) or partials[0]
+    #         new_partials = []
+    #         window, size = [], 0
+    #         for p in partials:
+    #             cost = len(p) + 3
+    #             if size + cost > budget and window:
+    #                 new_partials.append(
+    #                     self._merge_partials(
+    #                         "\n".join(f"- {x}" for x in window), max_out)
+    #                     or window[0])
+    #                 window, size = [], 0
+    #             window.append(p)
+    #             size += cost
+    #         if window:
+    #             new_partials.append(self._merge_partials("\n".join(f"- {x}" for x in window), max_out, task=task) or window[0])
+    #         partials = new_partials
+    #     return partials[0]
 
     def _rescue_context(self, history: List[Dict[str, Any]], attempt: int):
-        user_idx = 0
-        for i in range(len(history) - 1, -1, -1):
-            if history[i].get("role") == "user":
-                user_idx = i
-                break
-        trace = self._extract_tool_trace(history)
-        prog_rel = ""
-        try:
-            prog_dir = os.path.join(self.tool_manager.workdir, ".progress")
-            os.makedirs(prog_dir, exist_ok=True)
-            prog_path = os.path.join(prog_dir, f"{self.session_id}.md")
-            ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            with open(prog_path, "a", encoding="utf-8") as f:
-                f.write(f"\n## Rescue #{attempt} ({ts})\n{trace}\n")
-            prog_rel = f".progress/{self.session_id}.md"
-        except Exception:
-            pass
-        summary = trace
-        mode = self.config.get("loop_rescue_mode", "hybrid")
-        if mode in ("llm", "hybrid") and len(trace) > 600:
-            condensed = self._condense_trace_meta(trace)
-            if condensed:
-                summary = condensed
-        tail = self._last_tool_pairs(history, int(self.config.get("loop_rescue_keep_last", 1)))
-        progress_msg = {
-            "role": "user",
-            "content": (
-                f"[SYSTEM NOTE / PROGRESS] Current status of the ongoing task (Rescue #{attempt}):\n"
-                f"{summary}\n"
-                + (f"Details available upon request: read_file {prog_rel}\n" if prog_rel else "")
-                + "Arbeite ab hier weiter. Wiederhole erledigte Schritte NICHT.")}
-        new_history = history[:user_idx + 1] + [progress_msg] + tail
-        self.session_manager.save_session(self.session_id, new_history)
-        return new_history, f"Context-Rescue #{attempt}: {len(history)} → {len(new_history)} Messages"
+        return self.session_manager.rescue_context(
+            self.session_id, history, attempt,
+            condense_fn=self._condense_trace_meta,
+            workdir=self.tool_manager.workdir)
 
     def _inject_budget(
         self,
@@ -1656,24 +1416,7 @@ class AgentCore:
         return new_messages
 
     def _collapse_history_images(self, history: List[Dict[str, Any]], keep_last_user: bool = False) -> bool:
-        changed = False
-        last_user_idx = -1
-        if keep_last_user:
-            for i in range(len(history) - 1, -1, -1):
-                if history[i].get("role") == "user":
-                    last_user_idx = i
-                    break
-        for i, msg in enumerate(history):
-            if msg.get("role") != "user" or not isinstance(msg.get("content"), list):
-                continue
-            if i == last_user_idx:
-                continue
-            if not any(item.get("type") == "image_url" for item in msg["content"]):
-                continue
-            text = " ".join(item.get("text", "") for item in msg["content"] if item.get("type") == "text").strip()
-            msg["content"] = (text or "(image)") + "\n[IMAGE_ANALYZED]"
-            changed = True
-        return changed
+        return self.session_manager.collapse_history_images(history, keep_last_user)
 
     def get_session_id(self) -> str:
         return self.session_id
@@ -1682,10 +1425,18 @@ class AgentCore:
         tools = self.tool_manager.get_active_tools()
         return self.session_manager.get_total_tokens(self.session_id, self.system_prompt, tools)
 
+    def _refresh_session_tokens(self):
+        try:
+            self.last_session_tokens = self.get_total_tokens()
+        except Exception:
+            self.last_session_tokens = 0
+
     def start_new_session(self):
         self.tool_manager.reset_cwd()
         self.session_id = self.session_manager.create_session(self._build_system_prompt())
         self.notifications.clear()
+        self.last_tps = None
+        self._refresh_session_tokens()
 
     def switch_to(self, session_id: str):
         self.tool_manager.reset_cwd()
@@ -1696,15 +1447,18 @@ class AgentCore:
                 history[0]["content"] = self._build_system_prompt()
                 self.session_manager.save_session(session_id, history)
             self._add_continuation_marker(session_id)
+            self._refresh_session_tokens()
         else:
             raise ValueError(f"Session {session_id} not found.")
 
     def clear_current(self):
         self.session_manager.clear_session(self.session_id, self._build_system_prompt())
         self.notifications.clear()
+        self._refresh_session_tokens()
 
     def compress_history(self) -> str:
         result = self.session_manager.compress_history(self.session_id, rag_offload=False)
+        self._refresh_session_tokens()
         if result:
             old_len = result.get("old_len", "?")
             new_len = result.get("new_len", "?")
@@ -1766,15 +1520,6 @@ class AgentCore:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def get_active_tools_info(self) -> List[Dict[str, Any]]:
-        tools = []
-        for tool in self.tool_manager.available_tools:
-            func = tool.get("function", {})
-            tools.append({
-                "name": func.get("name", ""),
-                "description": func.get("description", ""),
-                "active": func.get("name", "") in self.tool_manager.active_tools})
-        return tools
 
     def _pause_spinner(self):
         st = getattr(self, "_active_status", None)
@@ -1795,611 +1540,617 @@ class AgentCore:
         finally:
             self._resume_spinner()
 
-class ChatInterface:
-    def __init__(self):
-        self.agent = AgentCore(enable_tts=False, notifier=self._on_notification)
-        self.session = PromptSession()
-        self.scheduler = TaskScheduler(config=self.agent.config)
-        self.agent.scheduler = self.scheduler
-        self.agent.tool_manager.scheduler = self.scheduler
-        self._status_message = ""
-        self._status_until = 0
-        self._active_status = None
-    async def _scheduler_loop(self):
-        interval = self.scheduler.check_interval
-        while True:
-            try:
-                await asyncio.sleep(interval)
-                if not self.scheduler.enabled:
-                    continue
-                def local_send(response: str, task: Dict[str, Any]):
-                    task_id = task.get("id", "?")
-                    console.print(f"[dim]⏰ Scheduler-Task {task_id}[/dim]")
-                    try:
-                        self.agent._print_assistant(response, title="Scheduler")
-                    except Exception:
-                        console.print(response)
-                await asyncio.to_thread(
-                    process_due_tasks,
-                    self.agent,
-                    self.scheduler,
-                    "cli",
-                    local_send)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                console.print(f"[dim red]Scheduler-Failure: {e}[/dim red]")
+# class ChatInterface:
+#     def __init__(self):
+#         self.agent = AgentCore(enable_tts=False, notifier=self._on_notification)
+#         self.session = PromptSession()
+#         self.scheduler = TaskScheduler(config=self.agent.config)
+#         self.agent.scheduler = self.scheduler
+#         self.agent.tool_manager.scheduler = self.scheduler
+#         self._status_message = ""
+#         self._status_until = 0
+#         self._active_status = None
+#     async def _scheduler_loop(self):
+#         interval = self.scheduler.check_interval
+#         while True:
+#             try:
+#                 await asyncio.sleep(interval)
+#                 if not self.scheduler.enabled:
+#                     continue
+#                 def local_send(response: str, task: Dict[str, Any]):
+#                     task_id = task.get("id", "?")
+#                     console.print(f"[dim]⏰ Scheduler-Task {task_id}[/dim]")
+#                     try:
+#                         self.agent._print_assistant(response, title="Scheduler")
+#                     except Exception:
+#                         console.print(response)
+#                 await asyncio.to_thread(
+#                     process_due_tasks,
+#                     self.agent,
+#                     self.scheduler,
+#                     "cli",
+#                     local_send)
+#             except asyncio.CancelledError:
+#                 break
+#             except Exception as e:
+#                 console.print(f"[dim red]Scheduler-Failure: {e}[/dim red]")
+#
+#     def _on_notification(self, msg: str):
+#         if any(x in msg for x in ("💉", "🧠", "🔔", "🔕", "🔊", "🔇", "🤔", "💭", "💾")):
+#             self._set_status(msg, 4.0)
+#
+#     def _get_bottom_toolbar(self):
+#         now = time.time()
+#         tokens = getattr(self.agent, "last_session_tokens", 0)
+#         if tokens is None or tokens < 0:
+#             tokens = 0
+#         ctx = self.agent.context_size or 0
+#         pct = int((tokens / ctx) * 100) if ctx else 0
+#         tps = f"{self.agent.last_tps:.1f} t/s" if getattr(self.agent, "last_tps", None) else ""
+#         status = f" {self._status_message} |" if now < self._status_until else ""
+#         if pct > 85:
+#             style = "bg:ansired #ffffff"
+#         elif pct > 65:
+#             style = "bg:ansiyellow #000000"
+#         else:
+#             style = "bg:#1f2937 #9ca3af"
+#         text = f"{status} Tokens: {tokens}/{ctx} ({pct}%)"
+#         if tps:
+#             text += f" | {tps}"
+#         return [(style, text)]
+#
+#     def _set_status(self, msg: str, duration: float = 3.0):
+#         self._status_message = msg
+#         self._status_until = time.time() + duration
+#
+#     async def run(self):
+#         ######################_clear_#####################
+#         #os.system('clear' if os.name != 'nt' else 'cls')#
+#         ##################################################
+#         console.print(Panel("[bold green]Vishva Chat[/bold green]\n" "Type /help for commands.", border_style="green"))
+#         scheduler_task = None
+#         if self.scheduler.enabled:
+#             scheduler_task = asyncio.create_task(self._scheduler_loop())
+#         console.print(f"[dim]Session: {self.agent.get_session_id()}[/dim]")
+#         if self.agent.startup_tokens >= 0:
+#             console.print(f"[dim]📊 Session Tokens: {self.agent.startup_tokens}[/dim]")
+#         else:
+#             console.print("[dim yellow]📊 Session Tokens: (Calculation failed)[/dim yellow]")
+#         try:
+#             width = os.get_terminal_size().columns
+#         except OSError:
+#             width = 50
+#         console.print("-" * width)
+#         while True:
+#             try:
+#                 user_input = (await self.session.prompt_async(
+#                     HTML('<prompt_color>🧘>> </prompt_color>'),
+#                     completer=CommandCompleter(),
+#                     style=Style.from_dict({'prompt_color': 'cyan'}),
+#                     bottom_toolbar=self._get_bottom_toolbar)).strip()
+#             except (EOFError, KeyboardInterrupt):
+#                 console.print("\n[bold yellow]bye 👋🏻[/bold yellow]")
+#                 break
+#             if not user_input:
+#                 continue
+#             if user_input.startswith('/'):
+#                 parts = user_input.split(' ', 1)
+#                 cmd = parts[0]
+#                 arg = parts[1] if len(parts) > 1 else None
+#                 if cmd == '/exit':
+#                     console.print("[bold yellow]bye 👋🏻[/bold yellow]")
+#                     break
+#                 if cmd == '/bye':
+#                     console.print("[bold yellow]bye 👋🏻[/bold yellow]")
+#                     break
+#                 elif cmd == '/new':
+#                     self.agent.start_new_session()
+#                     console.print(f"[bold green]✨ new session started: {self.agent.get_session_id()}[/bold green]")
+#                     try:
+#                         console.print(f"[dim]📊 Session Tokens: {self.agent.get_total_tokens()}[/dim]")
+#                     except Exception:
+#                         pass
+#                 elif cmd == '/sched':
+#                     if not hasattr(self.agent, "scheduler"):
+#                         console.print("[bold red]❌ Scheduler nicht initialisiert.[/bold red]")
+#                         continue
+#                     if not arg:
+#                         tasks = self.agent.scheduler.list_tasks()
+#                         if not tasks:
+#                             console.print("[yellow]Keine Scheduler-Tasks vorhanden.[/yellow]")
+#                         else:
+#                             console.print("[bold cyan]Scheduler-Tasks:[/bold cyan]")
+#                             for t in tasks:
+#                                 console.print(
+#                                     f"  • {t.get('id')} | {t.get('trigger_time')} | "
+#                                     f"target={t.get('target') or 'auto'} | "
+#                                     f"status={t.get('status')} | "
+#                                     f"{str(t.get('prompt', ''))[:60]}")
+#                         console.print("[dim]   Usage: /sched add <YYYY-MM-DD HH:MM:SS> <prompt>[/dim]")
+#                         console.print("[dim]          /sched cancel <id>[/dim]")
+#                         continue
+#                     parts = arg.split(maxsplit=1)
+#                     sub = parts[0].lower()
+#                     if sub == "add":
+#                         if len(parts) < 2:
+#                             console.print("[bold red]❌ Usage: /sched add <YYYY-MM-DD HH:MM:SS> <prompt>[/bold red]")
+#                             continue
+#                         rest = parts[1]
+#                         time_parts = rest.split(maxsplit=2)
+#                         if len(time_parts) < 3:
+#                             console.print("[bold red]❌ Usage: /sched add <YYYY-MM-DD HH:MM:SS> <prompt>[/bold red]")
+#                             continue
+#                         date_str = time_parts[0]
+#                         time_str = time_parts[1]
+#                         prompt = time_parts[2]
+#                         trigger_time = f"{date_str} {time_str}"
+#                         result = self.agent.scheduler.add_task(
+#                             chat_id=None,
+#                             trigger_time=trigger_time,
+#                             prompt=prompt,
+#                             target="cli")
+#                         if result.get("success"):
+#                             console.print(f"[bold green]✅ {result.get('message')}[/bold green]")
+#                         else:
+#                             console.print(f"[bold red]❌ {result.get('error')}[/bold red]")
+#                     elif sub == "cancel":
+#                         if len(parts) < 2:
+#                             console.print("[bold red]❌ Usage: /sched cancel <id>[/bold red]")
+#                             continue
+#                         task_id = parts[1].strip()
+#                         result = self.agent.scheduler.cancel_task(task_id)
+#                         if result.get("success"):
+#                             console.print(f"[bold green]✅ {result.get('message')}[/bold green]")
+#                         else:
+#                             console.print(f"[bold red]❌ {result.get('error')}[/bold red]")
+#                     else:
+#                         console.print("[bold red]❌ Usage: /sched | /sched add ... | /sched cancel <id>[/bold red]")
+#                 elif cmd == '/session':
+#                     if not arg:
+#                         sessions = self.agent.session_manager.list_sessions()
+#                         if sessions:
+#                             sessions_with_time = []
+#                             for s in sessions:
+#                                 path = p("data", "sessions", f"{s}.json")
+#                                 if os.path.exists(path):
+#                                     mtime = os.path.getmtime(path)
+#                                     mtime_str = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+#                                 else:
+#                                     mtime = 0
+#                                     mtime_str = "unknown"
+#                                 sessions_with_time.append((s, mtime, mtime_str))
+#                             sessions_with_time.sort(key=lambda x: x[1])
+#                             current = self.agent.get_session_id()
+#                             console.print(f"[bold cyan]available sessions ({len(sessions_with_time)}):[/bold cyan]")
+#                             for s, _, ts in sessions_with_time:
+#                                 marker = " ← [green]aktiv[/green]" if s == current else ""
+#                                 console.print(f"  • [bold]{s}[/bold] (Access: {ts}){marker}")
+#                             console.print("[dim]   /session <id> to change[/dim]")
+#                         else:
+#                             console.print("[yellow]No sessions available.[/yellow]")
+#                     else:
+#                         try:
+#                             self.agent.switch_to(arg)
+#                             console.print(f"[bold cyan]🔄 session loaded: {arg}[/bold cyan]")
+#                             try:
+#                                 console.print(f"[dim]📊 Session Tokens: {self.agent.get_total_tokens()}[/dim]")
+#                             except Exception:
+#                                 pass
+#                         except ValueError as e:
+#                             console.print(f"[bold red]{e}[/bold red]")
+#                 elif cmd == '/clear':
+#                     self.agent.clear_current()
+#                     console.print("[bold yellow]🧹 history deleted.[/bold yellow]")
+#                 elif cmd == '/history':
+#                     for m in self.agent.session_manager.load_session(self.agent.get_session_id()):
+#                         role = m['role']
+#                         content = m.get('content', '')
+#                         if role == 'system':
+#                             console.print(f"[bold magenta]{role.upper()}[/bold magenta]: {content[:80]}...")
+#                         elif role == 'user':
+#                             console.print(f"[bold blue]{role.upper()}[/bold blue]: {content}")
+#                         elif role == 'assistant':
+#                             has_tools = "🔧" if m.get('tool_calls') else ""
+#                             console.print(f"[bold green]{role.upper()}[/bold green]{has_tools}: {content[:200]}")
+#                         elif role == 'tool':
+#                             console.print(f"[bold yellow]{role.upper()}[/bold yellow]: {content[:100]}")
+#                 elif cmd == '/tokens':
+#                     console.print(f"🔢 Tokens: {self.agent.get_total_tokens()}")
+#                 elif cmd == '/threshold':
+#                     ctx = self.agent.context_size
+#                     thr = self.agent.compression_threshold
+#                     source = "config.json" if self.agent.config.get("compression_threshold") is not None else "auto (ctx_size - reserve)"
+#                     console.print(f"[bold cyan]📊 Compression Threshold[/bold cyan]\n  Value: {thr}\n  Context Size: {ctx}\n  Source: {source}")
+#                 elif cmd == '/config':
+#                     console.print(Panel(json.dumps(self.agent.config, indent=2, ensure_ascii=False), title="Config"))
+#                 elif cmd == '/voice':
+#                     if not self.agent.tts_manager:
+#                         console.print("[bold red]❌ TTS nicht verfügbar.[/bold red]")
+#                     elif not arg:
+#                         status = "AN" if self.agent.tts_manager.enabled else "AUS"
+#                         console.print(f"[bold yellow]🔊 Voice Status: {status}[/bold yellow]")
+#                         if status == "AN":
+#                             self._set_status(f"🔊", 2)
+#                         elif status == "AUS":
+#                             self._set_status(f"🔇", 2)
+#                     elif arg in ("on", "off"):
+#                         self.agent.tts_manager.toggle(arg == "on")
+#                         status = "AN" if self.agent.tts_manager.enabled else "AUS"
+#                         if status == "AN":
+#                             self._set_status(f"🔊", 2)
+#                         elif status == "AUS":
+#                             self._set_status(f"🔇", 2)
+#                     else:
+#                         console.print("[bold red]❌ Usage: /voice [on|off][/bold red]")
+#                 elif cmd == '/info':
+#                     sid = self.agent.get_session_id()
+#                     tokens = self.agent.get_total_tokens()
+#                     session_path = p("data", "sessions", f"{sid}.json")
+#                     created_at = "unknown"
+#                     last_access = "unknown"
+#                     if os.path.exists(session_path):
+#                         stat = os.stat(session_path)
+#                         created_at = datetime.datetime.fromtimestamp(stat.st_ctime).strftime("%Y-%m-%d %H:%M:%S")
+#                         last_access = datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+#                     active = [t['function']['name'] for t in self.agent.tool_manager.get_active_tools()]
+#                     if self.agent.rag_manager:
+#                         rag_count = len(self.agent.rag_manager.entries)
+#                         rag_info = f"RAG-Entries: {rag_count}"
+#                     else:
+#                         rag_info = "RAG: deaktiviert"
+#                     info_text = f"""[bold cyan]Session Info[/bold cyan]
+# ID:           [bold]{sid}[/bold]
+# Tokens:       {tokens}
+# Created:      {created_at}
+# Last accessed:{last_access}
+# Aktiv Tools: {', '.join(active) if active else 'Keine'}
+# {rag_info}"""
+#                     console.print(info_text)
+#                 elif cmd == '/zip':
+#                     result = self.agent.compress_history()
+#                     console.print(f"[bold cyan]{result}[/bold cyan]")
+#                 elif cmd == '/shrink':
+#                     result = self.agent.compress_history()
+#                     console.print(f"[bold cyan]{result}[/bold cyan]")
+#                 elif cmd == '/listtools':
+#                     try:
+#                         tools = self.agent.get_active_tools_info()
+#                         tools.sort(key=lambda t: (
+#                             0 if t.get("active") else 1,
+#                             str(t.get("name", "")).lower()))
+#                         lines = []
+#                         for t in tools:
+#                             state = "🟢" if t.get("active") else "🔴"
+#                             lines.append(f"{state} {t.get('name', '?')}")
+#                         console.print("\n".join(lines) if lines else "Keine Tools")
+#                     except Exception as e:
+#                         console.print("Error", str(e))
+#                 elif cmd == '/offloading':
+#                     if not arg:
+#                         status = "AN" if self.agent.offloading_enabled else "AUS"
+#                         console.print(f"[bold yellow]💾 Offloading: {status}[/bold yellow]")
+#                         self._set_status(f" Offloading: {status}", 2)
+#                     elif arg in ("on", "off"):
+#                         self.agent.offloading_enabled = (arg == "on")
+#                         self.agent.config["offloading_enabled"] = self.agent.offloading_enabled
+#                         self.agent._save_config()
+#                         status = "AN" if self.agent.offloading_enabled else "AUS"
+#                         console.print(f"[bold yellow]💾 Offloading: {status}[/bold yellow]")
+#                         self._set_status(f"Offloading: {status}", 2)
+#                         if self.agent.offloading_enabled:
+#                             console.print("[dim]   Tool-Args/Results are stored in the cache.[/dim]")
+#                         else:
+#                             console.print("[dim]   Tool-Args/Results  remain in history.[/dim]")
+#                     else:
+#                         console.print("[bold red]❌ Usage: /offloading [on|off][/bold red]")
+#                 elif cmd == '/sound':
+#                     if not arg:
+#                         status = "AN" if self.agent.sound_enabled else "AUS"
+#                         console.print(f"[bold yellow]🔔 Sound: {status}[/bold yellow]")
+#                         if status == "AN":
+#                             self._set_status(f"🔔", 2)
+#                         elif status == "AUS":
+#                             self._set_status(f"🔕", 2)
+#                     elif arg in ("on", "off"):
+#                         self.agent.sound_enabled = (arg == "on")
+#                         self.agent.config["sound_enabled"] = self.agent.sound_enabled
+#                         self.agent._save_config()
+#                         status = "AN" if self.agent.sound_enabled else "AUS"
+#                         console.print(f"[bold yellow] Sound: {status}[/bold yellow]")
+#                         if status == "AN":
+#                             self._set_status(f"🔔", 2)
+#                         elif status == "AUS":
+#                             self._set_status(f"🔕", 2)
+#                     else:
+#                         console.print("[bold red]❌ Usage: /sound [on|off][/bold red]")
+#                 elif cmd == '/showThinking':
+#                     if not arg:
+#                         status = "AN" if self.agent.show_thinking else "AUS"
+#                         console.print(f"[bold yellow]🤔 Thinking: {status}[/bold yellow]")
+#                         self._set_status(f" Think: {status}", 2)
+#                     elif arg in ("on", "off"):
+#                         self.agent.show_thinking = (arg == "on")
+#                         self.agent.config["show_thinking"] = self.agent.show_thinking
+#                         self.agent._save_config()
+#                         status = "AN" if self.agent.show_thinking else "AUS"
+#                         console.print(f"[bold yellow]🤔 Thinking: {status}[/bold yellow]")
+#                         self._set_status(f" Think: {status}", 2)
+#                         if self.agent.show_thinking:
+#                             console.print("[dim]   Modell-Thinking-blocks are displayed.[/dim]")
+#                         else:
+#                             console.print("[dim]   Modell-Thinking-blocks are filtered out.[/dim]")
+#                     else:
+#                         console.print("[bold red]❌ Usage: /showThinking [on|off][/bold red]")
+#
+#                 elif cmd == '/image':
+#                     if not arg:
+#                         console.print("[bold red]❌ Usage: /image <path> [optionaler Text][/bold red]")
+#                     else:
+#                         parts = arg.split(' ', 1)
+#                         img_path = parts[0]
+#                         img_text = parts[1] if len(parts) > 1 else "describe this picture."
+#
+#                         if not bool(self.agent.config.get("vision_enabled", True)):
+#                             console.print(
+#                                 "[bold red]❌ Vision disabled. "
+#                                 "set vision_enabled=true in config.json.[/bold red]")
+#                             continue
+#                         b64_url = self.agent._process_image(img_path)
+#                         if b64_url:
+#                             console.print(f"[bold green]🖼️ Image processed: {img_path}[/bold green]")
+#                             console.print("[bold cyan]Analyzing...[/bold cyan]")
+#                             try:
+#                                 response = await asyncio.to_thread(
+#                                     self.agent.chat,
+#                                     img_text,
+#                                     b64_url)
+#                                 if response:
+#                                     self.agent._print_answer(response)
+#                                     if self.agent.tts_manager and self.agent.tts_manager.enabled:
+#                                         self.agent.tts_manager.speak(response)
+#                             except Exception as e:
+#                                 console.print(f"[bold red]Error:[/bold red] {str(e)}")
+#                         else:
+#                             console.print(
+#                                 f"[bold red]❌ Image not found or invalid: {img_path}[/bold red]")
+#                 elif cmd == '/stt':
+#                     import tempfile
+#                     import shutil
+#                     import signal
+#                     recorder = None
+#                     if shutil.which("arecord"):
+#                         recorder = "arecord"
+#                     elif shutil.which("sox") or shutil.which("rec"):
+#                         recorder = "rec"
+#                     if not recorder:
+#                         console.print("[bold red]❌ No audio recorder found. Install alsa-utils (arecord) or sox (rec).[/bold red]")
+#                         continue
+#                     tmp_dir = tempfile.mkdtemp()
+#                     tmp_wav = os.path.join(tmp_dir, "recording.wav")
+#                     console.print(f"[bold cyan]🎙️ Recording in progress... Press ENTER to stop.[/bold cyan]")
+#                     if recorder == "arecord":
+#                         proc = subprocess.Popen(
+#                             ["arecord", "-f", "cd", tmp_wav],
+#                             stdout=subprocess.DEVNULL,
+#                             stderr=subprocess.DEVNULL)
+#                     else:
+#                         proc = subprocess.Popen(
+#                             ["rec", "-c", "1", "-r", "16000", "-b", "16", tmp_wav],
+#                             stdout=subprocess.DEVNULL,
+#                             stderr=subprocess.DEVNULL)
+#                     try:
+#                         input()
+#                     except (EOFError, KeyboardInterrupt):
+#                         pass
+#                     proc.terminate()
+#                     try:
+#                         proc.wait(timeout=2)
+#                     except subprocess.TimeoutExpired:
+#                         proc.kill()
+#                         proc.wait()
+#                     if not os.path.exists(tmp_wav) or os.path.getsize(tmp_wav) == 0:
+#                         console.print("[bold red]❌ Recording failed or empty.[/bold red]")
+#                         continue
+#                     console.print("[bold cyan]📝 Transcribe...[/bold cyan]")
+#                     stt_cmd = self.agent.config.get("stt_command", "")
+#                     if not stt_cmd:
+#                         if shutil.which("whisper"):
+#                             stt_cmd = "whisper {audio} --model tiny --language German --output_format txt --output_dir {dir}"
+#                         else:
+#                             console.print("[bold red]❌ No STT configured. Install whisper or set 'stt_command' in config.json.[/bold red]")
+#                             continue
+#                     txt_dir = tempfile.mkdtemp()
+#                     formatted_cmd = stt_cmd.format(audio=tmp_wav, dir=txt_dir)
+#                     transcript = ""
+#                     try:
+#                         result = subprocess.run(formatted_cmd, shell=True, capture_output=True, text=True, timeout=60)
+#                         txt_file = os.path.join(txt_dir, os.path.basename(tmp_wav).replace(".wav", ".txt"))
+#                         if os.path.exists(txt_file):
+#                             with open(txt_file, "r", encoding="utf-8") as f:
+#                                 transcript = f.read().strip()
+#                         else:
+#                             transcript = result.stdout.strip()
+#                     except Exception as e:
+#                         console.print(f"[bold red]❌ STT-Failure: {e}[/bold red]")
+#                         continue
+#                     finally:
+#                         try:
+#                             os.remove(tmp_wav)
+#                             shutil.rmtree(txt_dir, ignore_errors=True)
+#                             shutil.rmtree(tmp_dir, ignore_errors=True)
+#                         except:
+#                             pass
+#                     if not transcript:
+#                         console.print("[yellow]⚠️ Keine Transkription erhalten.[/yellow]")
+#                         continue
+#                     console.print(f"[bold green]📝 Transcript:[/bold green] {transcript}")
+#                     try:
+#                         response = await asyncio.to_thread(self.agent.chat, transcript)
+#                         if response:
+#                             self.agent._print_answer(response)
+#                             if self.agent.tts_manager and self.agent.tts_manager.enabled:
+#                                 self.agent.tts_manager.speak(response)
+#                     except Exception as e:
+#                         console.print(f"[bold red]Error:[/bold red] {str(e)}")
+#                 elif cmd == '/personality':
+#                     if not arg:
+#                         personas_dir = p("personas")
+#                         if os.path.exists(personas_dir):
+#                             files = sorted([f.replace(".md", "") for f in os.listdir(personas_dir) if f.endswith(".md")])
+#                             console.print("[bold cyan]Verfügbare Persönlichkeiten:[/bold cyan]")
+#                             for persona in files:
+#                                 console.print(f"  • {persona}")
+#                             console.print("[dim]   /personality <name> to switch[/dim]")
+#                         else:
+#                             console.print("[bold red]❌ personas/ directory not found.[/bold red]")
+#                     else:
+#                         result = self.agent.set_personality(arg)
+#                         if result.get("success"):
+#                             console.print(f"[bold green]✅ {result['message']}[/bold green]")
+#                         else:
+#                             console.print(f"[bold red]❌ {result['error']}[/bold red]")
+#                 elif cmd == '/persona':
+#                     if not arg:
+#                         personas_dir = p("personas")
+#                         if os.path.exists(personas_dir):
+#                             files = sorted([f.replace(".md", "") for f in os.listdir(personas_dir) if f.endswith(".md")])
+#                             console.print("[bold cyan]Verfügbare Persönlichkeiten:[/bold cyan]")
+#                             for persona in files:
+#                                 console.print(f"  • {persona}")
+#                             console.print("[dim]   /personality <name> to switch[/dim]")
+#                         else:
+#                             console.print("[bold red]❌ personas/ directory not found.[/bold red]")
+#                     else:
+#                         result = self.agent.set_personality(arg)
+#                         if result.get("success"):
+#                             console.print(f"[bold green]✅ {result['message']}[/bold green]")
+#                         else:
+#                             console.print(f"[bold red]❌ {result['error']}[/bold red]")
+#                 elif cmd == '/frame':
+#                     frame_on = self.agent.config.get("cli_frame_enabled", True)
+#                     if not arg:
+#                         status = "AN" if frame_on else "AUS"
+#                         console.print(f"[bold yellow]🖼️ Rahmen: {status}[/bold yellow]")
+#                         console.print("[dim]   Usage: /frame [on|off][/dim]")
+#                     elif arg in ("on", "off"):
+#                         frame_on = (arg == "on")
+#                         self.agent.config["cli_frame_enabled"] = frame_on
+#                         self.agent._save_config()
+#                         status = "AN" if frame_on else "AUS"
+#                         console.print(f"[bold yellow]🖼️ Rahmen: {status}[/bold yellow]")
+#                         if frame_on:
+#                             console.print("[dim]   Answers are displayed in a panel frame.[/dim]")
+#                         else:
+#                             console.print("[dim]   Replies are displayed without borders.[/dim]")
+#                     else:
+#                         console.print("[bold red]❌ Usage: /frame [on|off][/bold red]")
+#                 elif cmd == '/context':
+#                     msgs = getattr(self.agent, "_last_api_messages", None)
+#                     if not msgs:
+#                         console.print("[yellow]⚠️ No API calls have been made in this session yet.[/yellow]")
+#                         continue
+#                     tools = getattr(self.agent, "_last_api_tools", []) or []
+#                     turn = getattr(self.agent, "_last_api_turn", "?")
+#                     tool_names = [t.get("function", {}).get("name", "?") for t in tools]
+#                     console.print(Panel(
+#                         f"[bold cyan]RAM Context — Most Recently Sent (Tool-Turn {turn})[/bold cyan]\n"
+#                         f"Messages: {len(msgs)} | Tools activ: {len(tools)}"
+#                         + (f" ({', '.join(tool_names)})" if tool_names else ""),
+#                         expand=False))
+#                     if arg == "json":
+#                         console.print(Panel(
+#                             json.dumps(msgs, indent=2, ensure_ascii=False),
+#                             title="RAW JSON"))
+#                         continue
+#                     role_style = {"system": "magenta", "user": "blue",
+#                                 "assistant": "green", "tool": "yellow"}
+#                     for i, m in enumerate(msgs):
+#                         role = m.get("role", "?")
+#                         content = m.get("content", "")
+#                         if isinstance(content, list):
+#                             parts = []
+#                             for item in content:
+#                                 if isinstance(item, dict):
+#                                     if item.get("type") == "text":
+#                                         parts.append(str(item.get("text", "")))
+#                                     elif item.get("type") == "image_url":
+#                                         parts.append("[IMAGE_B64]")
+#                             content = "\n".join(parts)
+#                         head = f"[bold {role_style.get(role, 'white')}]{i:02d} {role.upper()}[/bold {role_style.get(role, 'white')}]"
+#                         tcs = m.get("tool_calls")
+#                         if tcs:
+#                             names = ", ".join(tc.get("function", {}).get("name", "?") for tc in tcs)
+#                             head += f" [bold yellow]🔧 → {names}[/bold yellow]"
+#                         if m.get("tool_call_id"):
+#                             head += f" [dim](call_id={str(m['tool_call_id'])[:12]}…)[/dim]"
+#                         console.print(head)
+#                         console.print(str(content))
+#                         console.print()
+#                 elif cmd == '/help':
+#                     help_text = """
+# [bold blue]Verfügbare Commands:[/bold blue]
+# /exit              – Beenden
+# /new               – Neue Session starten
+# /session <id>      – Zu Session wechseln
+# /clear             – Aktuelle History löschen
+# /history           – History anzeigen
+# /tokens            – Token-Anzahl (tiktoken)
+# /config            – Config anzeigen
+# /voice [on|off]            – Sprachausgabe steuern
+# /stt <seconds>     – Spracheingabe aufnehmen und transkribieren
+# /personality <name>– Persönlichkeit wechseln
+# /persona <name>    – Persönlichkeit wechseln
+# /offloading [on|off]       – Tool-Offloading toggeln
+# /sound [on|off]            – Benachrichtigungston toggeln
+# /showThinking [on|off]     – Thinking-Bloecke anzeigen
+# /image <path>      – Bild analysieren (Vision-Modell)
+# /threshold         – Aktuellen Compression-Threshold anzeigen
+# /context [json]    – RAM-Kontext zeigen (exakt das, was zuletzt an die API ging)
+# /help              – Diese Hilfe
+# """
+#                     console.print(help_text)
+#                 else:
+#                     console.print(f"[bold red]Unknown Command: {cmd}[/bold red]")
+#                 continue
+#             self._set_status("💭", 0)
+#             response = None
+#             with console.status("[bold cyan]💭Thinking…[/bold cyan]", spinner="dots") as status:
+#                 self._active_status = status
+#                 self.agent._active_status = status
+#                 try:
+#                     response = await asyncio.to_thread(self.agent.chat, user_input)
+#                 except Exception as e:
+#                     console.print(f"[bold red]Error:[/bold red] {str(e)}")
+#                 finally:
+#                     self._active_status = None
+#                     self.agent._active_status = None
+#             if response is None:
+#                 continue
+#             if self._status_message.startswith("💭"):
+#                 self._status_message = ""
+#             if self.agent.sound_enabled:
+#                 _play_notification_sound()
+#             if response:
+#                 self.agent._print_answer(response)
+#                 if self.agent.tts_manager and self.agent.tts_manager.enabled:
+#                     self.agent.tts_manager.speak(response)
+#             else:
+#                 console.print("[yellow]agent gave noncommittal answer.[/yellow]")
+#             try:
+#                 width = os.get_terminal_size().columns
+#             except OSError:
+#                 width = 50
+#             console.print("-" * width)
+#
+# async def main():
+#     interface = ChatInterface()
+#     await interface.run()
 
-    def _on_notification(self, msg: str):
-        if any(x in msg for x in ("💉", "🧠", "🔔", "🔕", "🔊", "🔇", "🤔", "💭", "💾")):
-            self._set_status(msg, 4.0)
-
-    def _get_bottom_toolbar(self):
-        now = time.time()
-        tokens = getattr(self.agent, "last_session_tokens", 0)
-        if tokens is None or tokens < 0:
-            tokens = 0
-        ctx = self.agent.context_size or 0
-        pct = int((tokens / ctx) * 100) if ctx else 0
-        tps = f"{self.agent.last_tps:.1f} t/s" if getattr(self.agent, "last_tps", None) else ""
-        status = f" {self._status_message} |" if now < self._status_until else ""
-        if pct > 85:
-            style = "bg:ansired #ffffff"
-        elif pct > 65:
-            style = "bg:ansiyellow #000000"
-        else:
-            style = "bg:#1f2937 #9ca3af"
-        text = f"{status} Tokens: {tokens}/{ctx} ({pct}%)"
-        if tps:
-            text += f" | {tps}"
-        return [(style, text)]
-
-    def _set_status(self, msg: str, duration: float = 3.0):
-        self._status_message = msg
-        self._status_until = time.time() + duration
-
-    async def run(self):
-        ######################_clear_#####################
-        #os.system('clear' if os.name != 'nt' else 'cls')#
-        ##################################################
-        console.print(Panel("[bold green]Vishva Chat[/bold green]\n" "Type /help for commands.", border_style="green"))
-        scheduler_task = None
-        if self.scheduler.enabled:
-            scheduler_task = asyncio.create_task(self._scheduler_loop())
-        console.print(f"[dim]Session: {self.agent.get_session_id()}[/dim]")
-        if self.agent.startup_tokens >= 0:
-            console.print(f"[dim]📊 Session Tokens: {self.agent.startup_tokens}[/dim]")
-        else:
-            console.print("[dim yellow]📊 Session Tokens: (Calculation failed)[/dim yellow]")
-        try:
-            width = os.get_terminal_size().columns
-        except OSError:
-            width = 50
-        console.print("-" * width)
-        while True:
-            try:
-                user_input = (await self.session.prompt_async(
-                    HTML('<prompt_color>🧘>> </prompt_color>'),
-                    completer=CommandCompleter(),
-                    style=Style.from_dict({'prompt_color': 'cyan'}),
-                    bottom_toolbar=self._get_bottom_toolbar)).strip()
-            except (EOFError, KeyboardInterrupt):
-                console.print("\n[bold yellow]bye 👋🏻[/bold yellow]")
-                break
-            if not user_input:
-                continue
-            if user_input.startswith('/'):
-                parts = user_input.split(' ', 1)
-                cmd = parts[0]
-                arg = parts[1] if len(parts) > 1 else None
-                if cmd == '/exit':
-                    console.print("[bold yellow]bye 👋🏻[/bold yellow]")
-                    break
-                if cmd == '/bye':
-                    console.print("[bold yellow]bye 👋🏻[/bold yellow]")
-                    break
-                elif cmd == '/new':
-                    self.agent.start_new_session()
-                    console.print(f"[bold green]✨ new session started: {self.agent.get_session_id()}[/bold green]")
-                    try:
-                        console.print(f"[dim]📊 Session Tokens: {self.agent.get_total_tokens()}[/dim]")
-                    except Exception:
-                        pass
-                elif cmd == '/sched':
-                    if not hasattr(self.agent, "scheduler"):
-                        console.print("[bold red]❌ Scheduler nicht initialisiert.[/bold red]")
-                        continue
-                    if not arg:
-                        tasks = self.agent.scheduler.list_tasks()
-                        if not tasks:
-                            console.print("[yellow]Keine Scheduler-Tasks vorhanden.[/yellow]")
-                        else:
-                            console.print("[bold cyan]Scheduler-Tasks:[/bold cyan]")
-                            for t in tasks:
-                                console.print(
-                                    f"  • {t.get('id')} | {t.get('trigger_time')} | "
-                                    f"target={t.get('target') or 'auto'} | "
-                                    f"status={t.get('status')} | "
-                                    f"{str(t.get('prompt', ''))[:60]}")
-                        console.print("[dim]   Usage: /sched add <YYYY-MM-DD HH:MM:SS> <prompt>[/dim]")
-                        console.print("[dim]          /sched cancel <id>[/dim]")
-                        continue
-                    parts = arg.split(maxsplit=1)
-                    sub = parts[0].lower()
-                    if sub == "add":
-                        if len(parts) < 2:
-                            console.print("[bold red]❌ Usage: /sched add <YYYY-MM-DD HH:MM:SS> <prompt>[/bold red]")
-                            continue
-                        rest = parts[1]
-                        time_parts = rest.split(maxsplit=2)
-                        if len(time_parts) < 3:
-                            console.print("[bold red]❌ Usage: /sched add <YYYY-MM-DD HH:MM:SS> <prompt>[/bold red]")
-                            continue
-                        date_str = time_parts[0]
-                        time_str = time_parts[1]
-                        prompt = time_parts[2]
-                        trigger_time = f"{date_str} {time_str}"
-                        result = self.agent.scheduler.add_task(
-                            chat_id=None,
-                            trigger_time=trigger_time,
-                            prompt=prompt,
-                            target="cli")
-                        if result.get("success"):
-                            console.print(f"[bold green]✅ {result.get('message')}[/bold green]")
-                        else:
-                            console.print(f"[bold red]❌ {result.get('error')}[/bold red]")
-                    elif sub == "cancel":
-                        if len(parts) < 2:
-                            console.print("[bold red]❌ Usage: /sched cancel <id>[/bold red]")
-                            continue
-                        task_id = parts[1].strip()
-                        result = self.agent.scheduler.cancel_task(task_id)
-                        if result.get("success"):
-                            console.print(f"[bold green]✅ {result.get('message')}[/bold green]")
-                        else:
-                            console.print(f"[bold red]❌ {result.get('error')}[/bold red]")
-                    else:
-                        console.print("[bold red]❌ Usage: /sched | /sched add ... | /sched cancel <id>[/bold red]")
-                elif cmd == '/session':
-                    if not arg:
-                        sessions = self.agent.session_manager.list_sessions()
-                        if sessions:
-                            sessions_with_time = []
-                            for s in sessions:
-                                path = p("data", "sessions", f"{s}.json")
-                                if os.path.exists(path):
-                                    mtime = os.path.getmtime(path)
-                                    mtime_str = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
-                                else:
-                                    mtime = 0
-                                    mtime_str = "unknown"
-                                sessions_with_time.append((s, mtime, mtime_str))
-                            sessions_with_time.sort(key=lambda x: x[1])
-                            current = self.agent.get_session_id()
-                            console.print(f"[bold cyan]available sessions ({len(sessions_with_time)}):[/bold cyan]")
-                            for s, _, ts in sessions_with_time:
-                                marker = " ← [green]aktiv[/green]" if s == current else ""
-                                console.print(f"  • [bold]{s}[/bold] (Access: {ts}){marker}")
-                            console.print("[dim]   /session <id> to change[/dim]")
-                        else:
-                            console.print("[yellow]No sessions available.[/yellow]")
-                    else:
-                        try:
-                            self.agent.switch_to(arg)
-                            console.print(f"[bold cyan]🔄 session loaded: {arg}[/bold cyan]")
-                            try:
-                                console.print(f"[dim]📊 Session Tokens: {self.agent.get_total_tokens()}[/dim]")
-                            except Exception:
-                                pass
-                        except ValueError as e:
-                            console.print(f"[bold red]{e}[/bold red]")
-                elif cmd == '/clear':
-                    self.agent.clear_current()
-                    console.print("[bold yellow]🧹 history deleted.[/bold yellow]")
-                elif cmd == '/history':
-                    for m in self.agent.session_manager.load_session(self.agent.get_session_id()):
-                        role = m['role']
-                        content = m.get('content', '')
-                        if role == 'system':
-                            console.print(f"[bold magenta]{role.upper()}[/bold magenta]: {content[:80]}...")
-                        elif role == 'user':
-                            console.print(f"[bold blue]{role.upper()}[/bold blue]: {content}")
-                        elif role == 'assistant':
-                            has_tools = "🔧" if m.get('tool_calls') else ""
-                            console.print(f"[bold green]{role.upper()}[/bold green]{has_tools}: {content[:200]}")
-                        elif role == 'tool':
-                            console.print(f"[bold yellow]{role.upper()}[/bold yellow]: {content[:100]}")
-                elif cmd == '/tokens':
-                    console.print(f"🔢 Tokens: {self.agent.get_total_tokens()}")
-                elif cmd == '/threshold':
-                    ctx = self.agent.context_size
-                    thr = self.agent.compression_threshold
-                    source = "config.json" if self.agent.config.get("compression_threshold") is not None else "auto (ctx_size - reserve)"
-                    console.print(f"[bold cyan]📊 Compression Threshold[/bold cyan]\n  Value: {thr}\n  Context Size: {ctx}\n  Source: {source}")
-                elif cmd == '/config':
-                    console.print(Panel(json.dumps(self.agent.config, indent=2, ensure_ascii=False), title="Config"))
-                elif cmd == '/voice':
-                    if not self.agent.tts_manager:
-                        console.print("[bold red]❌ TTS nicht verfügbar.[/bold red]")
-                    elif not arg:
-                        status = "AN" if self.agent.tts_manager.enabled else "AUS"
-                        console.print(f"[bold yellow]🔊 Voice Status: {status}[/bold yellow]")
-                        if status == "AN":
-                            self._set_status(f"🔊", 2)
-                        elif status == "AUS":
-                            self._set_status(f"🔇", 2)
-                    elif arg in ("on", "off"):
-                        self.agent.tts_manager.toggle(arg == "on")
-                        status = "AN" if self.agent.tts_manager.enabled else "AUS"
-                        if status == "AN":
-                            self._set_status(f"🔊", 2)
-                        elif status == "AUS":
-                            self._set_status(f"🔇", 2)
-                    else:
-                        console.print("[bold red]❌ Usage: /voice [on|off][/bold red]")
-                elif cmd == '/info':
-                    sid = self.agent.get_session_id()
-                    tokens = self.agent.get_total_tokens()
-                    session_path = p("data", "sessions", f"{sid}.json")
-                    created_at = "unknown"
-                    last_access = "unknown"
-                    if os.path.exists(session_path):
-                        stat = os.stat(session_path)
-                        created_at = datetime.datetime.fromtimestamp(stat.st_ctime).strftime("%Y-%m-%d %H:%M:%S")
-                        last_access = datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
-                    active = [t['function']['name'] for t in self.agent.tool_manager.get_active_tools()]
-                    if self.agent.rag_manager:
-                        rag_count = len(self.agent.rag_manager.entries)
-                        rag_info = f"RAG-Entries: {rag_count}"
-                    else:
-                        rag_info = "RAG: deaktiviert"
-                    info_text = f"""[bold cyan]Session Info[/bold cyan]
-ID:           [bold]{sid}[/bold]
-Tokens:       {tokens}
-Created:      {created_at}
-Last accessed:{last_access}
-Aktiv Tools: {', '.join(active) if active else 'Keine'}
-{rag_info}"""
-                    console.print(info_text)
-                elif cmd == '/zip':
-                    result = self.agent.compress_history()
-                    console.print(f"[bold cyan]{result}[/bold cyan]")
-                elif cmd == '/shrink':
-                    result = self.agent.compress_history()
-                    console.print(f"[bold cyan]{result}[/bold cyan]")
-                elif cmd == '/listtools':
-                    try:
-                        tools = self.agent.get_active_tools_info()
-                        tools.sort(key=lambda t: (
-                            0 if t.get("active") else 1,
-                            str(t.get("name", "")).lower()))
-                        lines = []
-                        for t in tools:
-                            state = "🟢" if t.get("active") else "🔴"
-                            lines.append(f"{state} {t.get('name', '?')}")
-                        print("\n".join(lines) if lines else "Keine Tools")
-                    except Exception as e:
-                        print("Error", str(e))
-                elif cmd == '/offloading':
-                    if not arg:
-                        status = "AN" if self.agent.offloading_enabled else "AUS"
-                        console.print(f"[bold yellow]💾 Offloading: {status}[/bold yellow]")
-                        self._set_status(f" Offloading: {status}", 2)
-                    elif arg in ("on", "off"):
-                        self.agent.offloading_enabled = (arg == "on")
-                        self.agent.config["offloading_enabled"] = self.agent.offloading_enabled
-                        self.agent._save_config()
-                        status = "AN" if self.agent.offloading_enabled else "AUS"
-                        console.print(f"[bold yellow]💾 Offloading: {status}[/bold yellow]")
-                        self._set_status(f"Offloading: {status}", 2)
-                        if self.agent.offloading_enabled:
-                            console.print("[dim]   Tool-Args/Results are stored in the cache.[/dim]")
-                        else:
-                            console.print("[dim]   Tool-Args/Results  remain in history.[/dim]")
-                    else:
-                        console.print("[bold red]❌ Usage: /offloading [on|off][/bold red]")
-                elif cmd == '/sound':
-                    if not arg:
-                        status = "AN" if self.agent.sound_enabled else "AUS"
-                        console.print(f"[bold yellow]🔔 Sound: {status}[/bold yellow]")
-                        if status == "AN":
-                            self._set_status(f"🔔", 2)
-                        elif status == "AUS":
-                            self._set_status(f"🔕", 2)
-                    elif arg in ("on", "off"):
-                        self.agent.sound_enabled = (arg == "on")
-                        self.agent.config["sound_enabled"] = self.agent.sound_enabled
-                        self.agent._save_config()
-                        status = "AN" if self.agent.sound_enabled else "AUS"
-                        console.print(f"[bold yellow] Sound: {status}[/bold yellow]")
-                        if status == "AN":
-                            self._set_status(f"🔔", 2)
-                        elif status == "AUS":
-                            self._set_status(f"🔕", 2)
-                    else:
-                        console.print("[bold red]❌ Usage: /sound [on|off][/bold red]")
-                elif cmd == '/showThinking':
-                    if not arg:
-                        status = "AN" if self.agent.show_thinking else "AUS"
-                        console.print(f"[bold yellow]🤔 Thinking: {status}[/bold yellow]")
-                        self._set_status(f" Think: {status}", 2)
-                    elif arg in ("on", "off"):
-                        self.agent.show_thinking = (arg == "on")
-                        self.agent.config["show_thinking"] = self.agent.show_thinking
-                        self.agent._save_config()
-                        status = "AN" if self.agent.show_thinking else "AUS"
-                        console.print(f"[bold yellow]🤔 Thinking: {status}[/bold yellow]")
-                        self._set_status(f" Think: {status}", 2)
-                        if self.agent.show_thinking:
-                            console.print("[dim]   Modell-Thinking-blocks are displayed.[/dim]")
-                        else:
-                            console.print("[dim]   Modell-Thinking-blocks are filtered out.[/dim]")
-                    else:
-                        console.print("[bold red]❌ Usage: /showThinking [on|off][/bold red]")
-
-                elif cmd == '/image':
-                    if not arg:
-                        console.print("[bold red]❌ Usage: /image <path> [optionaler Text][/bold red]")
-                    else:
-                        parts = arg.split(' ', 1)
-                        img_path = parts[0]
-                        img_text = parts[1] if len(parts) > 1 else "describe this picture."
-
-                        if not bool(self.agent.config.get("vision_enabled", True)):
-                            console.print(
-                                "[bold red]❌ Vision disabled. "
-                                "set vision_enabled=true in config.json.[/bold red]")
-                            continue
-                        b64_url = self.agent._process_image(img_path)
-                        if b64_url:
-                            console.print(f"[bold green]🖼️ Image processed: {img_path}[/bold green]")
-                            console.print("[bold cyan]Analyzing...[/bold cyan]")
-                            try:
-                                response = await asyncio.to_thread(
-                                    self.agent.chat,
-                                    img_text,
-                                    b64_url)
-                                if response:
-                                    self.agent._print_answer(response)
-                                    if self.agent.tts_manager and self.agent.tts_manager.enabled:
-                                        self.agent.tts_manager.speak(response)
-                            except Exception as e:
-                                console.print(f"[bold red]Error:[/bold red] {str(e)}")
-                        else:
-                            console.print(
-                                f"[bold red]❌ Image not found or invalid: {img_path}[/bold red]")
-                elif cmd == '/stt':
-                    import tempfile
-                    import shutil
-                    import signal
-                    recorder = None
-                    if shutil.which("arecord"):
-                        recorder = "arecord"
-                    elif shutil.which("sox") or shutil.which("rec"):
-                        recorder = "rec"
-                    if not recorder:
-                        console.print("[bold red]❌ No audio recorder found. Install alsa-utils (arecord) or sox (rec).[/bold red]")
-                        continue
-                    tmp_dir = tempfile.mkdtemp()
-                    tmp_wav = os.path.join(tmp_dir, "recording.wav")
-                    console.print(f"[bold cyan]🎙️ Recording in progress... Press ENTER to stop.[/bold cyan]")
-                    if recorder == "arecord":
-                        proc = subprocess.Popen(
-                            ["arecord", "-f", "cd", tmp_wav],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL)
-                    else:
-                        proc = subprocess.Popen(
-                            ["rec", "-c", "1", "-r", "16000", "-b", "16", tmp_wav],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL)
-                    try:
-                        input()
-                    except (EOFError, KeyboardInterrupt):
-                        pass
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-                        proc.wait()
-                    if not os.path.exists(tmp_wav) or os.path.getsize(tmp_wav) == 0:
-                        console.print("[bold red]❌ Recording failed or empty.[/bold red]")
-                        continue
-                    console.print("[bold cyan]📝 Transcribe...[/bold cyan]")
-                    stt_cmd = self.agent.config.get("stt_command", "")
-                    if not stt_cmd:
-                        if shutil.which("whisper"):
-                            stt_cmd = "whisper {audio} --model tiny --language German --output_format txt --output_dir {dir}"
-                        else:
-                            console.print("[bold red]❌ No STT configured. Install whisper or set 'stt_command' in config.json.[/bold red]")
-                            continue
-                    txt_dir = tempfile.mkdtemp()
-                    formatted_cmd = stt_cmd.format(audio=tmp_wav, dir=txt_dir)
-                    transcript = ""
-                    try:
-                        result = subprocess.run(formatted_cmd, shell=True, capture_output=True, text=True, timeout=60)
-                        txt_file = os.path.join(txt_dir, os.path.basename(tmp_wav).replace(".wav", ".txt"))
-                        if os.path.exists(txt_file):
-                            with open(txt_file, "r", encoding="utf-8") as f:
-                                transcript = f.read().strip()
-                        else:
-                            transcript = result.stdout.strip()
-                    except Exception as e:
-                        console.print(f"[bold red]❌ STT-Failure: {e}[/bold red]")
-                        continue
-                    finally:
-                        try:
-                            os.remove(tmp_wav)
-                            shutil.rmtree(txt_dir, ignore_errors=True)
-                            shutil.rmtree(tmp_dir, ignore_errors=True)
-                        except:
-                            pass
-                    if not transcript:
-                        console.print("[yellow]⚠️ Keine Transkription erhalten.[/yellow]")
-                        continue
-                    console.print(f"[bold green]📝 Transcript:[/bold green] {transcript}")
-                    try:
-                        response = await asyncio.to_thread(self.agent.chat, transcript)
-                        if response:
-                            self.agent._print_answer(response)
-                            if self.agent.tts_manager and self.agent.tts_manager.enabled:
-                                self.agent.tts_manager.speak(response)
-                    except Exception as e:
-                        console.print(f"[bold red]Error:[/bold red] {str(e)}")
-                elif cmd == '/personality':
-                    if not arg:
-                        personas_dir = p("personas")
-                        if os.path.exists(personas_dir):
-                            files = sorted([f.replace(".md", "") for f in os.listdir(personas_dir) if f.endswith(".md")])
-                            console.print("[bold cyan]Verfügbare Persönlichkeiten:[/bold cyan]")
-                            for persona in files:
-                                console.print(f"  • {persona}")
-                            console.print("[dim]   /personality <name> to switch[/dim]")
-                        else:
-                            console.print("[bold red]❌ personas/ directory not found.[/bold red]")
-                    else:
-                        result = self.agent.set_personality(arg)
-                        if result.get("success"):
-                            console.print(f"[bold green]✅ {result['message']}[/bold green]")
-                        else:
-                            console.print(f"[bold red]❌ {result['error']}[/bold red]")
-                elif cmd == '/persona':
-                    if not arg:
-                        personas_dir = p("personas")
-                        if os.path.exists(personas_dir):
-                            files = sorted([f.replace(".md", "") for f in os.listdir(personas_dir) if f.endswith(".md")])
-                            console.print("[bold cyan]Verfügbare Persönlichkeiten:[/bold cyan]")
-                            for persona in files:
-                                console.print(f"  • {persona}")
-                            console.print("[dim]   /personality <name> to switch[/dim]")
-                        else:
-                            console.print("[bold red]❌ personas/ directory not found.[/bold red]")
-                    else:
-                        result = self.agent.set_personality(arg)
-                        if result.get("success"):
-                            console.print(f"[bold green]✅ {result['message']}[/bold green]")
-                        else:
-                            console.print(f"[bold red]❌ {result['error']}[/bold red]")
-                elif cmd == '/frame':
-                    frame_on = self.agent.config.get("cli_frame_enabled", True)
-                    if not arg:
-                        status = "AN" if frame_on else "AUS"
-                        console.print(f"[bold yellow]🖼️ Rahmen: {status}[/bold yellow]")
-                        console.print("[dim]   Usage: /frame [on|off][/dim]")
-                    elif arg in ("on", "off"):
-                        frame_on = (arg == "on")
-                        self.agent.config["cli_frame_enabled"] = frame_on
-                        self.agent._save_config()
-                        status = "AN" if frame_on else "AUS"
-                        console.print(f"[bold yellow]🖼️ Rahmen: {status}[/bold yellow]")
-                        if frame_on:
-                            console.print("[dim]   Answers are displayed in a panel frame.[/dim]")
-                        else:
-                            console.print("[dim]   Replies are displayed without borders.[/dim]")
-                    else:
-                        console.print("[bold red]❌ Usage: /frame [on|off][/bold red]")
-                elif cmd == '/context':
-                    msgs = getattr(self.agent, "_last_api_messages", None)
-                    if not msgs:
-                        console.print("[yellow]⚠️ No API calls have been made in this session yet.[/yellow]")
-                        continue
-                    tools = getattr(self.agent, "_last_api_tools", []) or []
-                    turn = getattr(self.agent, "_last_api_turn", "?")
-                    tool_names = [t.get("function", {}).get("name", "?") for t in tools]
-                    console.print(Panel(
-                        f"[bold cyan]RAM Context — Most Recently Sent (Tool-Turn {turn})[/bold cyan]\n"
-                        f"Messages: {len(msgs)} | Tools activ: {len(tools)}"
-                        + (f" ({', '.join(tool_names)})" if tool_names else ""),
-                        expand=False))
-                    if arg == "json":
-                        console.print(Panel(
-                            json.dumps(msgs, indent=2, ensure_ascii=False),
-                            title="RAW JSON"))
-                        continue
-                    role_style = {"system": "magenta", "user": "blue",
-                                "assistant": "green", "tool": "yellow"}
-                    for i, m in enumerate(msgs):
-                        role = m.get("role", "?")
-                        content = m.get("content", "")
-                        if isinstance(content, list):
-                            parts = []
-                            for item in content:
-                                if isinstance(item, dict):
-                                    if item.get("type") == "text":
-                                        parts.append(str(item.get("text", "")))
-                                    elif item.get("type") == "image_url":
-                                        parts.append("[IMAGE_B64]")
-                            content = "\n".join(parts)
-                        head = f"[bold {role_style.get(role, 'white')}]{i:02d} {role.upper()}[/bold {role_style.get(role, 'white')}]"
-                        tcs = m.get("tool_calls")
-                        if tcs:
-                            names = ", ".join(tc.get("function", {}).get("name", "?") for tc in tcs)
-                            head += f" [bold yellow]🔧 → {names}[/bold yellow]"
-                        if m.get("tool_call_id"):
-                            head += f" [dim](call_id={str(m['tool_call_id'])[:12]}…)[/dim]"
-                        console.print(head)
-                        console.print(str(content))
-                        console.print()
-                elif cmd == '/help':
-                    help_text = """
-[bold blue]Verfügbare Commands:[/bold blue]
-/exit              – Beenden
-/new               – Neue Session starten
-/session <id>      – Zu Session wechseln
-/clear             – Aktuelle History löschen
-/history           – History anzeigen
-/tokens            – Token-Anzahl (tiktoken)
-/config            – Config anzeigen
-/voice [on|off]            – Sprachausgabe steuern
-/stt <seconds>     – Spracheingabe aufnehmen und transkribieren
-/personality <name>– Persönlichkeit wechseln
-/persona <name>    – Persönlichkeit wechseln
-/offloading [on|off]       – Tool-Offloading toggeln
-/sound [on|off]            – Benachrichtigungston toggeln
-/showThinking [on|off]     – Thinking-Bloecke anzeigen
-/image <path>      – Bild analysieren (Vision-Modell)
-/threshold         – Aktuellen Compression-Threshold anzeigen
-/context [json]    – RAM-Kontext zeigen (exakt das, was zuletzt an die API ging)
-/help              – Diese Hilfe
-"""
-                    console.print(help_text)
-                else:
-                    console.print(f"[bold red]Unknown Command: {cmd}[/bold red]")
-                continue
-            self._set_status("💭", 0)
-            response = None
-            with console.status("[bold cyan]💭Thinking…[/bold cyan]", spinner="dots") as status:
-                self._active_status = status
-                self.agent._active_status = status
-                try:
-                    response = await asyncio.to_thread(self.agent.chat, user_input)
-                except Exception as e:
-                    console.print(f"[bold red]Error:[/bold red] {str(e)}")
-                finally:
-                    self._active_status = None
-                    self.agent._active_status = None
-            if response is None:
-                continue
-            if self._status_message.startswith("💭"):
-                self._status_message = ""
-            if self.agent.sound_enabled:
-                _play_notification_sound()
-            if response:
-                self.agent._print_answer(response)
-                if self.agent.tts_manager and self.agent.tts_manager.enabled:
-                    self.agent.tts_manager.speak(response)
-            else:
-                console.print("[yellow]agent gave noncommittal answer.[/yellow]")
-            try:
-                width = os.get_terminal_size().columns
-            except OSError:
-                width = 50
-            console.print("-" * width)
-
-async def main():
-    interface = ChatInterface()
-    await interface.run()
+def main():
+    """Entry-Point-Kompatibilität (run.sh startet vishva.agent).
+    Lazy-Import verhindert zirkulären Import (cli importiert agent)."""
+    from .cli import main as _cli_main
+    return _cli_main()
 
 if __name__ == "__main__":
     try:

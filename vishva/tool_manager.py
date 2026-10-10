@@ -1,13 +1,13 @@
 import os
-import re
-import ast
+#import re
+#import ast
 import sys
 import json
-import time
-import shlex
+#import time
+#import shlex
 import shutil
-import tempfile
-import subprocess
+#import tempfile
+#import subprocess
 from pathlib import Path
 from rich.text import Text
 from rich.panel import Panel
@@ -19,11 +19,11 @@ from typing import Dict, List, Any, Optional, Tuple
 
 class ToolManager:
     def __init__(self, toolpool_path: str = None, activetools_path: str = None, tts_manager=None, config=None, exclude_tools: set = None):
-        self.toolpool_path = toolpool_path or p("config", "toolpool.txt")
+        self.toolpool_path = toolpool_path or self._default_toolpool_path()
         self.activetools_path = activetools_path or p("config", "activetools.txt")
         self.tts_manager = tts_manager
         self.config = config or {}
-        self.workdir = cfg_path(self.config, "agent_workdir", "working_dir")
+        self.workdir = os.path.abspath(self.config.get("agent_workdir", "working_dir"))
         self.agent_cwd = self.workdir
         try:
             os.makedirs(self.workdir, exist_ok=True)
@@ -62,7 +62,10 @@ class ToolManager:
             cwd = os.path.abspath(os.getcwd())
         except Exception as e:
             return False, f"Invalid path: {e}"
-        dangerous = ["/etc/passwd", "/etc/shadow", "/etc/sudoers", "/root/", "/boot/", "..", "~", "$HOME", "${HOME}", "`", "$(", "${"]
+        dangerous = list(self.config.get("dangerous_paths", [
+            "/etc/passwd", "/etc/shadow", "/etc/sudoers", "/root/", "/boot/",
+            "`", "$(", "${"
+        ]))
         for d in dangerous:
             if d in path:
                 return False, f"Path contains dangerous pattern: '{d}'"
@@ -109,10 +112,15 @@ class ToolManager:
             backup_dir = os.path.normpath(os.path.join(
                 os.path.dirname(os.path.abspath(__file__)), backup_dir))
         try:
-            project_root = os.path.dirname(os.path.abspath(__file__))
-            rel = os.path.relpath(os.path.abspath(path), BASE_DIR)
-            if rel.startswith(".."):
-                return None
+            abs_path = os.path.abspath(path)
+            # Relativ zu BASE_DIR wenn möglich, sonst absoluter Pfad als Struktur
+            try:
+                rel = os.path.relpath(abs_path, BASE_DIR)
+                if rel.startswith(".."):
+                    # Außerhalb BASE_DIR: Pfadstruktur beibehalten
+                    rel = abs_path.lstrip("/")
+            except ValueError:
+                rel = abs_path.lstrip("/")
             backup_path = os.path.join(backup_dir, rel)
             os.makedirs(os.path.dirname(backup_path) or backup_dir, exist_ok=True)
             from datetime import datetime
@@ -131,6 +139,11 @@ class ToolManager:
             return final
         except Exception:
             return None
+
+    @staticmethod
+    def _default_toolpool_path() -> str:
+        toolpath = p("config", "toolpool.json")
+        return toolpath
 
     def _load_or_init(self):
         if os.path.exists(self.toolpool_path):
@@ -214,6 +227,7 @@ class ToolManager:
         "bg_task": "_bg_task",
         "list_dir": "_list_dir",
         "weather": "_weather",
+        "tarot": "_tarot",
         "news_digest": "_news_digest",
         "brightness_ctl": "_brightness_ctl",
         "send_image": "_send_image",
@@ -226,6 +240,10 @@ class ToolManager:
         "rag_update": "_rag_update",
         "rag_delete": "_rag_delete",}
 
+    def reset_tool_counter(self):
+        """Setzt den Tool-Call-Zähler zurück (Aufruf pro Chat-Turn)."""
+        self.tool_call_count = 0
+
     def execute_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         if name in self.exclude_tools:
             return {"error": f"Tool '{name}' is not available in this environment."}
@@ -234,9 +252,10 @@ class ToolManager:
             if not verdict.get("allow"):
                 reason = verdict.get("reason") or "no reason given"
                 return {
-                    "error": f"Tool '{name}' was rejected by the user. Reason: {reason}",
+                    "error": f"Tool '{name}' wurde vom Nutzer abgelehnt. Grund: {reason}",
                     "denied": True,
-                    "denied_reason": reason,}
+                    "denied_reason": reason,
+                }
         if name.startswith("mcp__"):
             if not self.mcp:
                 return {"error": "MCP disabled (mcp_enabled=false or init failed)"}
@@ -250,6 +269,8 @@ class ToolManager:
             return {"error": f"{type(e).__name__}: {e}", "tool": name}
 
     def set_confirm_handler(self, fn):
+        """Interface-Handler: fn(tool_name, args_preview) -> dict
+           {'allow': bool, 'reason': str, 'always': bool}"""
         self.confirm_fn = fn
 
     def _build_args_preview(self, arguments: Dict[str, Any], max_len: int = 0) -> str:
@@ -274,6 +295,7 @@ class ToolManager:
         return any(fnmatch.fnmatch(name, pat) for pat in patterns)
 
     def _clear_lines(self, n: int):
+        """Entfernt n Zeilen rückwärts via ANSI — nur auf echtem TTY wirksam."""
         if n <= 0:
             return
         try:
@@ -281,15 +303,17 @@ class ToolManager:
                 return
         except Exception:
             return
-        sys.stdout.write(f"\033[{n}F")
+        sys.stdout.write(f"\033[{n}F")             # Cursor n Zeilen hoch
         for _ in range(n):
-            sys.stdout.write("\033[2K\033[1B")
-        sys.stdout.write(f"\033[{n}F")
+            sys.stdout.write("\033[2K\033[1B")     # Zeile leeren, eine runter
+        sys.stdout.write(f"\033[{n}F")             # zurück zur Startposition
         sys.stdout.flush()
 
     def _render_confirm(self, name: str, preview: str) -> int:
+        """Rendert den Bestätigungs-Block. Gibt die Anzahl ausgegebener Zeilen zurück."""
         use_frame = bool(self.config.get("tool_confirm_frame", True))
         lines_printed = 0
+
         if use_frame and self._confirm_console is not None:
             body = Text()
             body.append(f"Tool:  ", style="bold")
@@ -299,16 +323,20 @@ class ToolManager:
                 body.append(preview)
             panel = Panel(
                 body,
-                title="🔐 Tool Confirmation",
+                title="🔐 Tool-Bestätigung",
                 border_style="bold red",
-                padding=(0, 1),)
+                padding=(0, 1),
+            )
+            # Zeilen zählen über Dummy-Console
             from io import StringIO
             buf = StringIO()
-            dummy = Console(file=buf, width=self._confirm_console.width, soft_wrap=True, highlight=False)
+            dummy = Console(file=buf, width=self._confirm_console.width,
+                            soft_wrap=True, highlight=False)
             dummy.print(panel)
             rendered = buf.getvalue()
             lines_printed += rendered.count("\n")
             self._confirm_console.print(panel)
+            # Prompt unter dem Panel
             prompt_line = "   [y] allow  [n] deny  [r] deny+reason  [a] always"
             print(prompt_line)
             lines_printed += 1
@@ -318,6 +346,7 @@ class ToolManager:
                 print(f"   {preview}")
             print("   [y] allow   [n] deny   [r] deny with reason   [a] always")
             lines_printed = 3 + (1 if preview else 0)
+
         sys.stdout.flush()
         return lines_printed
 
@@ -340,10 +369,12 @@ class ToolManager:
         try:
             lines = self._render_confirm(name, preview)
             ans = input("   Wahl [y/n/r/a]: ").strip().lower()
+
             reason_text = ""
             if ans in ("r", "reason"):
                 reason_text = input("   Grund für die Ablehnung: ").strip()
                 lines += 1
+
             if ans in ("a", "always"):
                 self._session_approved.add(name)
                 verdict = {"allow": True, "reason": ""}
@@ -353,7 +384,9 @@ class ToolManager:
                 verdict = {"allow": False, "reason": reason_text or "user denied"}
             else:
                 verdict = {"allow": False, "reason": "user denied"}
+
             self._clear_lines(lines + 1)
+
             if verdict["allow"]:
                 tag = "✓ erlaubt" + (" (session)" if ans in ("a", "always") else "")
             else:
@@ -363,17 +396,21 @@ class ToolManager:
         except (EOFError, KeyboardInterrupt):
             return {"allow": False, "reason": "user aborted"}
 
+
     def _ask_confirmation(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         preview = self._build_args_preview(arguments)
+        # 1) Interface-Handler (CLI/GUI)
         if self.confirm_fn is not None:
             try:
                 return self._normalize_verdict(self.confirm_fn(name, preview), name)
             except Exception as e:
                 print(f"[ToolConfirm] Handler-Fehler: {e}")
+        # 2) stdin nur im echten CLI-Kontext
         agent = getattr(self, "agent_ref", None)
         interface = getattr(agent, "interface", "") if agent else ""
         if interface == "cli" and sys.stdin.isatty():
             return self._stdin_confirm(name, preview)
+        # 3) Config-Fallback (Daemon, Subagent, Bot)
         fallback = str(self.config.get("tool_confirm_fallback", "allow")).lower()
         return {"allow": fallback in ("allow", "yes"), "reason": ""}
 
@@ -385,7 +422,61 @@ class ToolManager:
         handlers = set(self._HANDLERS)
         return {
             "pool_ohne_handler": sorted(pooled - handlers),
-            "handler_ohne_pool": sorted(handlers - pooled),}
+            "handler_ohne_pool": sorted(handlers - pooled),
+        }
+
+    # ---------- Argument-Previews (CLI-Tool-Log) ----------
+    @staticmethod
+    def _arg_is_path_like(key: str, value) -> bool:
+        if not isinstance(value, str):
+            return False
+        k = str(key).lower()
+        if any(t in k for t in ("path", "file", "dir", "folder",
+                                "target", "dest", "source", "src")):
+            return True
+        return ("/" in value) or ("\\" in value)
+
+    @staticmethod
+    def _truncate_preview(value, budget: int, path_like: bool) -> str:
+        s = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+        budget = max(budget, 8)
+        marker = "(...)"
+        if len(s) <= budget:
+            return s
+        keep = budget - len(marker)
+        if path_like:
+            return marker + s[-keep:]
+        return s[:keep] + marker
+
+    def format_args_preview(self, args) -> str:
+        """Formt Tool-Argumente für die CLI-Log-Zeile."""
+        total = int(self.config.get("tool_log_args_chars",
+                      self.config.get("tool_log_args_length", 120)) or 120)
+        if not isinstance(args, dict):
+            s = json.dumps(args, ensure_ascii=False, default=str)
+            return s[:total] + "(...)" if len(s) > total else s
+        if not args:
+            return ""
+        per_min = int(self.config.get("tool_log_args_min_chars",
+                        self.config.get("tool_log_args_per_min", 18)) or 18)
+        items = list(args.items())
+        per = max(per_min, total // len(items))
+        parts = []
+        for key, value in items:
+            path_like = self._arg_is_path_like(key, value)
+            parts.append(f"{key}: '{self._truncate_preview(value, per, path_like)}'")
+        return " ".join(parts)
+
+    def get_active_tools_info(self) -> List[Dict[str, Any]]:
+        """Tool-Liste für /listtools etc. (public interface)."""
+        tools = []
+        for tool in self.available_tools:
+            func = tool.get("function", {})
+            tools.append({
+                "name": func.get("name", ""),
+                "description": func.get("description", ""),
+                "active": func.get("name", "") in self.active_tools})
+        return tools
 
 from . import tools as _tool_modules
 _tool_modules.bind_tools(ToolManager)

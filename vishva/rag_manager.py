@@ -1,5 +1,5 @@
 import os
-import re
+#import re
 import json
 import math
 import hashlib
@@ -62,13 +62,32 @@ class RAGManager:
                 pass
 
     def _get_meta(self, config: dict):
-        if self._meta is None:
+        # Cache-Key aus URL+Model, damit unterschiedliche Routings separate Clients bekommen
+        url = str(config.get("meta_model_url", "") or "")
+        model = str(config.get("meta_model_name", "") or "")
+        cache_key = f"{url}|{model}"
+
+        # Alte Struktur-Migration: self._meta kann noch ein einzelner Client sein
+        if not hasattr(self, "_meta_clients"):
+            old = getattr(self, "_meta", None)
+            self._meta_clients = {}
+            if old is not None:
+                # Heuristik: altes Modell unter einem Default-Key ablegen
+                self._meta_clients["_legacy"] = old
+
+        client = self._meta_clients.get(cache_key)
+        if client is None:
             try:
                 from .background_agent import MetaModelClient
             except ImportError:
                 return None
-            self._meta = MetaModelClient(self.config)
-        return self._meta if getattr(self._meta, "available", False) else None
+            try:
+                client = MetaModelClient(config)
+            except Exception:
+                return None
+            self._meta_clients[cache_key] = client
+
+        return client if getattr(client, "available", False) else None
 
     def _load(self):
         if getattr(self, "_storage", None) is None:
@@ -1098,7 +1117,7 @@ class RAGManager:
             "- Questions about a PROJECT, TECHNOLOGY, or HOW-TO you've discussed before\n"
             "- Questions about the user's OWN CODE, FILES, or PATHS\n"
             "- Any substantive question that could benefit from past context\n\n"
-            "If YES: generate 2-5 SEARCH QUERIES. "
+            "If YES: generate 2-5 SEARCH QUERIES in GERMAN. "
             "Queries must be FULL PHRASES or QUESTIONS, not just keywords.\n"
             "Examples:\n"
             "- 'was weißt du über Karlheinz Müller?' → 'wer ist karlheinz müller' | 'karlheinz müller beruf'\n"
@@ -1205,8 +1224,8 @@ class RAGManager:
             if debug_rag:
                 print("[RAG-ENRICH] No relevant info found by meta model")
             return ""
-        else:
-            print("💉")
+        #else:
+        #    print("💉")
         return response3.strip()
 
     def extract_from_turn(self, user_message: str, assistant_answer: str, config: dict, prev_user_msg: str = "", prev_asst_msg: str = ""):
@@ -1257,13 +1276,13 @@ class RAGManager:
             f"- project (priority 0-1): Current project facts (temporary, subject to rotation)\n"
             f"- miscellaneous (priority 0-3): Fallback for anything unclear\n\n"
             f"Examples:\n"
-            f'- User: "My name is Alex" → {{"text": "users name is Alex", "category": "user_info", "priority": 3}}\n'
-            f'- User: "I program in Python and use FastAPI" → {{"text": "User programs in Python and uses FastAPI", "category": "preference", "priority": 2}}\n'
-            f'- User: "My computer has 64 GB of RAM and an RTX 4090" → {{"text": "System: 64GB RAM, RTX 4090 GPU", "category": "system", "priority": 2}}\n'
-            f'- User: "You should always answer in German" → {{"text": "The agent should respond in German", "category": "agent", "priority": 3}}\n'
-            f'- Assistant: "I can program in Python, Bash, and Go" → {{"text": "The agent can program in Python, Bash, and Go", "category": "agent", "priority": 2}}  (NOT user_info!)\n'
-            f'- Assistant: "I am Vishva, your assistant" → {{"text": "The assistants name is Vishva", "category": "agent", "priority": 3}}\n'
-            f'- User: "You install X with pip install y" → {{"text": "How-to: Install X using pip install y", "category": "knowhow", "priority": 2}}\n\n'
+            f'- User: "Ich heiße Alex" → {{"text": "Der User heißt Alex", "category": "user_info", "priority": 3}}\n'
+            f'- User: "Ich programmiere in Python und nutze FastAPI" → {{"text": "User programmiert in Python, nutzt FastAPI", "category": "preference", "priority": 2}}\n'
+            f'- User: "Mein Rechner hat 64GB RAM und eine RTX 4090" → {{"text": "System: 64GB RAM, RTX 4090 GPU", "category": "system", "priority": 2}}\n'
+            f'- User: "Du sollst immer auf Deutsch antworten" → {{"text": "Agent soll auf Deutsch antworten", "category": "agent", "priority": 3}}\n'
+            f'- Assistant: "Ich kann Python, Bash und Go programmieren" → {{"text": "Agent kann Python, Bash, Go programmieren", "category": "agent", "priority": 2}}  (NOT user_info!)\n'
+            f'- Assistant: "Ich bin Vishva, deine Assistentin" → {{"text": "Die Assistentin heißt Vishva", "category": "agent", "priority": 3}}\n'
+            f'- User: "Man installiert X mit pip install y" → {{"text": "How-to: X installieren via pip install y", "category": "knowhow", "priority": 2}}\n\n'
             f"Do NOT extract:\n"
             f"- Greetings, smalltalk, questions without concrete answers\n"
             f"- Information the Assistant just retrieved from existing knowledge\n"

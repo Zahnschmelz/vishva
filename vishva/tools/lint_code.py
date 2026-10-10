@@ -1,13 +1,15 @@
 """Auto-extrahiertes Tool-Modul (aus tool_manager.py)."""
 import os
-import re
+#import re
 import ast
 import json
-import time
-import shutil
+#import time
+#import shutil
 import tempfile
 import subprocess
-from typing import Any, Dict, List, Optional, Tuple
+#from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
+
 try:
     import requests
 except ImportError:
