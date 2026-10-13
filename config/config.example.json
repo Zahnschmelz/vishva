@@ -267,6 +267,8 @@
   "api_max_retries": 1,
   "history_archive_enabled": true,
   "history_archive_max_files": 10,
+  "enable_stream": true,
+  "stream_thinking_lines": 5,
 
   "_section_mcp": "--- MCP ---",
   "_hint_mcp": "MCP config",

@@ -1069,7 +1069,7 @@ class RAGManager:
         results.sort(key=lambda x: x["score"], reverse=True)
         return results[:max_results]
 
-    def enrich_context(self, user_message: str, config: dict, prev_user_msg: str = "", prev_asst_msg: str = "") -> str:
+    def enrich_context(self, user_message: str, config: dict, prev_user_msg: str = "", prev_asst_msg: str = "", progress_callback=None) -> str:
         if not self.enabled:
             return ""
         if not bool(config.get("rag_meta_enrichment_enabled", True)):
@@ -1130,6 +1130,11 @@ class RAGManager:
         response1 = meta.chat(search_prompt, max_tokens=80, temperature=0.0)
         if debug_rag:
             print(f"[RAG-ENRICH] Stage 1 response: {response1}")
+        if progress_callback and response1:
+            try:
+                progress_callback(f"💉 [Enrichment 1/2] {response1}")
+            except Exception:
+                pass
         if not response1 or response1.upper().startswith("NO"):
             if debug_rag:
                 print("[RAG-ENRICH] No RAG context needed")
@@ -1220,6 +1225,11 @@ class RAGManager:
         response3 = meta.chat(filter_prompt, max_tokens=300, temperature=0.1)
         if debug_rag:
             print(f"[RAG-ENRICH] Stage 3 response: {response3[:100] if response3 else 'None'}")
+        if progress_callback and response3:
+            try:
+                progress_callback(f"💉 [Enrichment 2/2]\n{response3}")
+            except Exception:
+                pass
         if not response3 or "NO_RELEVANT_INFO" in response3.upper():
             if debug_rag:
                 print("[RAG-ENRICH] No relevant info found by meta model")

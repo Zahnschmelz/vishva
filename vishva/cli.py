@@ -1,40 +1,28 @@
 import os
-#import io
-#import re
-#import sys
-#import copy
 import time
 import json
-#import string
+import queue
 import shutil
-#import base64
-#import random
 import asyncio
-#import requests
 import datetime
-#import threading
 import subprocess
 from rich.panel import Panel
-#from rich.markup import escape
-#from .paths import p, cfg_path
-from .paths import p
-from .agent import AgentCore
-from rich.console import Console
-#from rich.markdown import Markdown
-#from .tool_manager import ToolManager
+from rich.console import Console, Group
+from rich.live import Live
+from rich.layout import Layout
+from rich.text import Text
+from rich.markup import escape
 from prompt_toolkit.styles import Style
 from prompt_toolkit import PromptSession
-#from .session_manager import SessionManager
 from prompt_toolkit.formatted_text import HTML
-#from .tts_manager import TTSManager as TTSManager
-#from .code_manager import CodeManager, CODE_BLOCK_RE, LANG_TO_EXT
-#from typing import Dict, List, Any, Optional, Callable
 from typing import Dict, Any
-from .scheduler import TaskScheduler, process_due_tasks
 from prompt_toolkit.completion import Completer, Completion
 
-console = Console()
+from .paths import p
+from .agent import AgentCore
+from .scheduler import TaskScheduler, process_due_tasks
 
+console = Console()
 
 def _play_notification_sound():
     for fname in ("alarm.mp3", "alarm.wav"):
@@ -76,6 +64,65 @@ class ChatInterface:
         self._status_message = ""
         self._status_until = 0
         self._active_status = None
+        self._stream_queue = queue.Queue()
+        self.agent.set_chunk_callback(self._on_chunk)
+        self.stream_lines = int(self.agent.config.get("stream_thinking_lines", 5))
+
+    def _on_chunk(self, delta: Dict[str, Any]):
+        """Callback vom Agent: schreibt Chunks in die Queue."""
+        self._stream_queue.put(delta)
+
+    def _stream_display(self):
+        from rich.console import Group
+        from rich.live import Live
+        from rich.panel import Panel
+        from rich.spinner import Spinner
+        from rich.text import Text
+        stream_lines = int(self.agent.config.get("stream_thinking_lines", 5))
+        reasoning_buf = []
+        content_buf = []
+        tool_logs = []
+        spinner = Spinner("dots", text="Thinking…", style="bold cyan")
+        def build_window():
+            full_text = "".join(reasoning_buf) + "".join(content_buf)
+            lines = full_text.split("\n")
+            window = lines[-stream_lines:] if lines else [""]
+            return Panel(
+                Text("\n".join(window), overflow="fold"),
+                title="[bold cyan]💭 Live[/bold cyan]",
+                border_style="cyan",
+                height=stream_lines + 2)
+        def build_live():
+            parts = [build_window(), spinner]
+            for log in tool_logs:
+                parts.append(Text(log, style="bold yellow"))
+            return Group(*parts)
+        finished = False
+        with Live(build_live(), refresh_per_second=12, transient=True) as live:
+            while True:
+                try:
+                    delta = self._stream_queue.get(timeout=0.1)
+                except queue.Empty:
+                    live.update(build_live())
+                    continue
+                dtype = delta.get("type")
+                if dtype == "done":
+                    if finished:
+                        continue          # zweites done ignorieren
+                    finished = True
+                    break
+                elif dtype == "tool_log":
+                    tool_logs.append(delta.get("content", ""))
+                elif dtype == "reasoning":
+                    reasoning_buf.append(delta.get("content", ""))
+                elif dtype == "content":
+                    content_buf.append(delta.get("content", ""))
+                elif dtype == "enrichment":
+                    reasoning_buf.append(delta.get("content", "") + "\n")
+                live.update(build_live())
+        for log in tool_logs:
+            console.print(f"[bold yellow]{escape(log)}[/bold yellow]")
+
     async def _scheduler_loop(self):
         interval = self.scheduler.check_interval
         while True:
@@ -640,16 +687,38 @@ Aktiv Tools: {', '.join(active) if active else 'Keine'}
                 continue
             self._set_status("💭", 0)
             response = None
-            with console.status("[bold cyan]💭Thinking…[/bold cyan]", spinner="dots") as status:
-                self._active_status = status
-                self.agent._active_status = status
+            enable_stream = bool(self.agent.config.get("enable_stream", False))
+            if enable_stream:
+                # NEU: Queue leeren, damit alte done-Signale vom
+                # vorherigen Turn das neue Display nicht sofort beenden
+                while not self._stream_queue.empty():
+                    try:
+                        self._stream_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                # --- Streaming: Live-Display parallel zum Chat im Thread ---
+                stream_task = asyncio.create_task(
+                    asyncio.to_thread(self._stream_display))
                 try:
                     response = await asyncio.to_thread(self.agent.chat, user_input)
                 except Exception as e:
                     console.print(f"[bold red]Error:[/bold red] {str(e)}")
                 finally:
-                    self._active_status = None
-                    self.agent._active_status = None
+                    self._stream_queue.put({"type": "done"})
+                    await stream_task
+            else:
+                # --- Non-Streaming (wie bisher) ---
+                with console.status("[bold cyan]💭Thinking…[/bold cyan]", spinner="dots") as status:
+                    self._active_status = status
+                    self.agent._active_status = status
+                    try:
+                        response = await asyncio.to_thread(self.agent.chat, user_input)
+                    except Exception as e:
+                        console.print(f"[bold red]Error:[/bold red] {str(e)}")
+                    finally:
+                        self._active_status = None
+                        self.agent._active_status = None
+
             if response is None:
                 continue
             if self._status_message.startswith("💭"):

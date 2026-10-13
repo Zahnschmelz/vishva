@@ -236,7 +236,6 @@ class SessionManager:
         total += 255 * image_count
         return total
 
-    # ---------- History-Archive ----------
     def _archive_dir(self, session_id: str) -> str:
         d = p("data", "history_archive", session_id)
         try:
@@ -245,13 +244,10 @@ class SessionManager:
             pass
         return d
 
-    def _archive_history_block(self, session_id: str,
-                               block: List[Dict[str, Any]]) -> str:
-        """Exportiert den Kompressions-Block VOR der Kompression.
-        Returns absoluter Pfad der Archiv-Datei (leer bei Fehler)."""
+    def _archive_history_block(self, session_id: str, block: List[Dict[str, Any]]) -> str:
         if not block:
             return ""
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         archive_dir = self._archive_dir(session_id)
         fname = f"{ts}_{len(block)}msgs.json"
         fpath = os.path.join(archive_dir, fname)
@@ -270,7 +266,6 @@ class SessionManager:
         return os.path.abspath(fpath)
 
     def _cleanup_archive(self, session_id: str):
-        """Behält nur die letzten N Archiv-Files pro Session."""
         keep = int(self.config.get("history_archive_max_files", 10) or 0)
         if keep <= 0:
             return
@@ -286,7 +281,6 @@ class SessionManager:
             pass
 
     def _build_archive_note(self, archive_path: str) -> Dict[str, Any]:
-        """Nachricht, die VOR der Summary in die neue History kommt."""
         return {
             "role": "user",
             "content": (
@@ -312,7 +306,6 @@ class SessionManager:
             self._cleanup_session_cache(session_id, history)
             return None
 
-        # NEU: Kompressions-Block VOR der Kompression archivieren
         archive_path = ""
         if bool(self.config.get("history_archive_enabled", True)):
             archive_path = self._archive_history_block(session_id, middle_msgs)
@@ -320,7 +313,6 @@ class SessionManager:
         if rag_offload:
             offloaded_turns = sum(1 for m in middle_msgs if m.get("role") == "user")
             new_history = [system_msg]
-            # NEU: Archiv-Verweis VOR der Offload-Note
             if archive_path:
                 new_history.append(self._build_archive_note(archive_path))
             new_history.append({
@@ -341,7 +333,6 @@ class SessionManager:
             self._cleanup_session_cache(session_id, history)
             return None
         new_history = [system_msg]
-        # NEU: Archiv-Verweis VOR der Summary
         if archive_path:
             new_history.append(self._build_archive_note(archive_path))
         new_history.append({
@@ -372,7 +363,6 @@ class SessionManager:
             sanitized.append(new_msg)
         return sanitized
 
-    # ---------- Context Rescue ----------
     @staticmethod
     def _tool_result_status(res_raw: str) -> str:
         try:
@@ -442,16 +432,11 @@ class SessionManager:
 
     def rescue_context(self, session_id: str, history: List[Dict[str, Any]],
                        attempt: int, condense_fn=None, workdir: str = None):
-        """Context-Rescue: History kompakt umbauen + optional auto-compress.
-        condense_fn: Callback fn(trace) -> str|None für LLM-Zusammenfassung
-                     (kommt vom Agent; None = roher Trace)."""
-        # 1) Alte Progress-Notes entfernen (verhindert Wachstum pro Rescue)
         system_msg = history[0] if history and history[0].get("role") == "system" else None
         clean_history = [
             msg for msg in history
             if not (msg.get("role") == "user"
-                    and "[SYSTEM NOTE / PROGRESS]" in str(msg.get("content", "")))
-        ]
+                    and "[SYSTEM NOTE / PROGRESS]" in str(msg.get("content", "")))]
         user_idx = None
         for i in range(len(clean_history) - 1, -1, -1):
             if clean_history[i].get("role") == "user":
@@ -460,7 +445,6 @@ class SessionManager:
         if user_idx is None:
             user_idx = 0
 
-        # 2) Tool-Trace + Progress-File
         trace = self.extract_tool_trace(clean_history)
         prog_rel = ""
         if workdir:
@@ -475,7 +459,6 @@ class SessionManager:
             except Exception:
                 pass
 
-        # 3) Kondensieren via Callback (LLM bleibt im Agent)
         summary = trace
         mode = str(self.config.get("loop_rescue_mode", "hybrid"))
         if condense_fn is not None and mode in ("llm", "hybrid") and len(trace) > 600:
@@ -486,7 +469,6 @@ class SessionManager:
             if condensed:
                 summary = condensed
 
-        # 4) Kompakte History bauen
         keep = int(self.config.get("loop_rescue_keep_last", 1))
         tail = self.last_tool_pairs(clean_history, keep)
         progress_msg = {
@@ -507,8 +489,6 @@ class SessionManager:
         new_history.extend(tail)
         self.save_session(session_id, new_history)
         pre_len = len(new_history)
-
-        # 5) Auto-Compress nach dem Rescue (abschaltbar via Config)
         compress_log = ""
         if bool(self.config.get("loop_rescue_auto_compress", True)):
             try:
@@ -723,24 +703,24 @@ class SessionManager:
 
     def _extract_referenced_ids(self, history: List[Dict[str, Any]]) -> Set[str]:
         referenced = set()
+        pointer_re = re.compile(r"\[POINTER:([^\]]+)\]")
         for msg in history:
+            # Pointer in JEDEM String-Content suchen (auch assistant-Summarys)
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                for m in pointer_re.finditer(content):
+                    ref_id = m.group(1).split("/")[-1].replace(".json", "")
+                    if ref_id:
+                        referenced.add(ref_id)
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
                 for tc in msg["tool_calls"]:
                     tc_id = tc.get("id", "")
                     if tc_id:
                         referenced.add(tc_id)
             elif msg.get("role") == "tool":
-                content = msg.get("content", "")
                 tc_id = msg.get("tool_call_id", "")
                 if tc_id:
                     referenced.add(tc_id)
-                if content.startswith("[POINTER:"):
-                    try:
-                        ref_id = content.split("/")[-1].replace(".json]", "")
-                        if ref_id:
-                            referenced.add(ref_id)
-                    except Exception:
-                        pass
         return referenced
 
     def _cleanup_session_cache(self, session_id: str, history: List[Dict[str, Any]]):
@@ -779,7 +759,8 @@ class SessionManager:
                 except Exception:
                     pass
 
-    def apply_tool_ttl(self, history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def apply_tool_ttl(self, history: List[Dict[str, Any]],
+                       session_id: Optional[str] = None) -> List[Dict[str, Any]]:
         if not history or len(history) <= 2:
             return history
         system_msg = history[0] if history[0].get("role") == "system" else None
@@ -797,13 +778,15 @@ class SessionManager:
             turn_msgs = history[start:end]
             turns_back = (len(turn_indices) - 1) - turn_idx - 1
             if turns_back >= self.tool_ttl_turns:
-                turn_msgs = self._compress_turn_tool_pairs(turn_msgs)
+                turn_msgs = self._compress_turn_tool_pairs(turn_msgs, session_id)   # ← session_id
             new_history.extend(turn_msgs)
         return new_history
 
-    def _compress_turn_tool_pairs(self, turn_msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _compress_turn_tool_pairs(self, turn_msgs: List[Dict[str, Any]],
+                                  session_id: Optional[str] = None) -> List[Dict[str, Any]]:
         result = []
         i = 0
+        chunk_size = int(self.config.get("read_cache_chunk_chars", 1000) or 1000)
         while i < len(turn_msgs):
             msg = turn_msgs[i]
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
@@ -818,13 +801,16 @@ class SessionManager:
                     else:
                         break
                 summary_parts = []
+                pointers = []
                 for tc in tool_calls:
                     func = tc.get("function", {})
                     name = func.get("name", "unknown")
                     tc_id = tc.get("id", "unknown")
+                    arguments = func.get("arguments", "{}")
                     result_msg = next(
                         (tr for tr in tool_results if tr.get("tool_call_id") == tc_id),
                         None)
+                    result_content = result_msg.get("content", "") if result_msg else ""
                     status = "done"
                     if result_msg:
                         content = result_msg.get("content", "")
@@ -840,12 +826,31 @@ class SessionManager:
                         except (json.JSONDecodeError, TypeError, ValueError):
                             if "error" in content.lower():
                                 status = "error"
+
+                    # NEU: Arguments + Result in den Agent-Cache offloaden
+                    if session_id and tc_id != "unknown":
+                        entry = self._load_cache_entry(session_id, tc_id) or {}
+                        entry.update({
+                            "name": name,
+                            "arguments": arguments,
+                            "result": result_content,
+                            "status": status})
+                        try:
+                            self.save_chunked_cache(
+                                session_id, tc_id, entry, chunk_size=chunk_size)
+                            pointers.append(
+                                f"[POINTER:{self._cache_file(session_id, tc_id)}]")
+                        except Exception as e:
+                            print(f"[ToolTTL] Cache write failed for {tc_id}: {e}")
+
                     summary_parts.append(f"{name}[{tc_id[:6]}]={status}")
                 cache_hint = ""
                 if summary_parts:
                     ids = [tc.get("id", "unknown")[:6] for tc in tool_calls]
                     cache_hint = f" Cache IDs: {', '.join(ids)}"
                 summary = f"[TOOL_HISTORY: {' | '.join(summary_parts)}.{cache_hint}]"
+                if pointers:
+                    summary += "\nDetails offloaded (read_cache with path=...):\n" + "\n".join(pointers)
                 result.append({
                     "role": "assistant",
                     "content": summary})
@@ -857,22 +862,15 @@ class SessionManager:
 
     def compress_history_pointers(self, session_id: str, history: List[Dict[str, Any]],
                                    offload: bool = True, skip_last_tool_results: int = 0) -> List[Dict[str, Any]]:
-        """Offloadet Arguments in den Cache und kürzt Tool-Results.
 
-        skip_last_tool_results: Anzahl der letzten Tool-Results, die NICHT gekürzt werden
-                                (damit der Agent sie im aktuellen Turn vollständig sieht)."""
         MAX_RESULT = self.config.get("max_tool_result_chars", 500)
         MAX_ARGS = self.config.get("max_tool_args_chars", 500)
 
-        # Finde die Indizes aller Tool-Results
         tool_result_indices = [i for i, msg in enumerate(history) if msg.get("role") == "tool"]
 
-        # Bestimme, welche Tool-Results gekürzt werden dürfen
         if skip_last_tool_results > 0 and len(tool_result_indices) >= skip_last_tool_results:
-            # Nur die Tool-Results vor den letzten N kürzen
             truncate_indices = set(tool_result_indices[:-skip_last_tool_results])
         else:
-            # Alle Tool-Results kürzen
             truncate_indices = set(tool_result_indices)
 
         new_history = []
@@ -890,14 +888,12 @@ class SessionManager:
                     arguments = func.get("arguments", "")
 
                     if len(arguments) > MAX_ARGS and offload:
-                        # Arguments in Cache auslagern
                         entry = self._load_cache_entry(session_id, tc_id)
                         if not entry:
                             entry = {}
                         entry.update({"name": name, "arguments": arguments})
                         self._save_cache_entry(session_id, tc_id, entry)
 
-                        # Kompaktes JSON-Stub
                         stub = json.dumps({
                             "_offloaded": True,
                             "cache_path": self._cache_file(session_id, tc_id),
@@ -922,7 +918,6 @@ class SessionManager:
                 result = msg.get("content", "")
                 name = msg.get("name", "")
 
-                # Cache immer schreiben
                 if offload:
                     entry = self._load_cache_entry(session_id, tc_id)
                     if not entry:
@@ -936,11 +931,9 @@ class SessionManager:
                     if is_new:
                         offload_count += 1
 
-                # Prüfen, ob dieses Tool-Result gekürzt werden soll
                 should_truncate = idx in truncate_indices
 
                 if should_truncate and len(result) > MAX_RESULT:
-                    # Kürzen + Hint
                     short = result[:MAX_RESULT]
                     if offload:
                         short += f"\n[... truncated, use read_cache with path={self._cache_file(session_id, tc_id)} for full output]"
@@ -951,7 +944,6 @@ class SessionManager:
                         "content": short
                     })
                 else:
-                    # Vollständiges Result (aktueller Turn oder unter dem Limit)
                     new_history.append({
                         "role": "tool",
                         "tool_call_id": tc_id,
@@ -1003,7 +995,6 @@ class SessionManager:
         except Exception:
             pass
 
-        # 1) Restore aus dem Offloading-Cache (Hint enthält path=... oder "cache_path": "...")
         m = re.search(r'(?:path=|"cache_path":\s*")([^\]\s"]+\.json)', s)
         if m:
             cpath = m.group(1)
@@ -1025,10 +1016,8 @@ class SessionManager:
             except Exception:
                 pass
 
-        # 2) Truncation-Marker entfernen, Control-Chars escapen, JSON schließen
         cleaned = re.sub(r"\n?\[\.{3}[^\]]*truncated[^\]]*\]", "", s)
-        cleaned = re.sub(r"[\x00-\x1f]",
-                         lambda c: "\\u%04x" % ord(c.group(0)), cleaned)
+        cleaned = re.sub(r"[\x00-\x1f]", lambda c: "\\u%04x" % ord(c.group(0)), cleaned)
         if cleaned.endswith("\\"):
             cleaned = cleaned[:-1]
         for closer in ('"}', '"}}', '}', ''):
@@ -1038,15 +1027,13 @@ class SessionManager:
             except Exception:
                 continue
 
-        # 3) Letzter Ausweg: valides Stub (History bleibt sendbar)
         return json.dumps({
             "_truncated": True,
             "_note": "original arguments were truncated and could not be restored"
         }, ensure_ascii=False)
 
     def sanitize_history_tool_calls(self, history) -> bool:
-        """Repariert alle tool_call-Arguments in der History.
-        Returns True, wenn etwas geändert wurde."""
+
         changed = False
         for msg in history:
             for tc in (msg.get("tool_calls") or []):
@@ -1058,11 +1045,7 @@ class SessionManager:
                     changed = True
         return changed
 
-    # ---------- Image-Collapse ----------
     def collapse_history_images(self, history: List[Dict[str, Any]], keep_last_user: bool = False) -> bool:
-        """Ersetzt image_url-Content in älteren Messages durch Text-Platzhalter.
-        keep_last_user=True: die letzte User-Message behält ihr Bild.
-        Returns True, wenn etwas geändert wurde."""
         changed = False
         last_user_idx = None
         if keep_last_user:
@@ -1085,7 +1068,87 @@ class SessionManager:
                 msg["content"] = new_content
         return changed
 
-    # ---------- Meta-Condense (braucht meta_call_fn) ----------
+    _CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```")
+
+    def strip_old_code_blocks(self, history: List[Dict[str, Any]],
+                              keep_last_turns: Optional[int] = None):
+        if keep_last_turns is None:
+            keep_last_turns = int(self.config.get("code_strip_after_turns", 0) or 0)
+        if keep_last_turns <= 0:
+            return history, False
+        user_idx = [i for i, m in enumerate(history) if m.get("role") == "user"]
+        if len(user_idx) <= keep_last_turns:
+            return history, False
+        cut = user_idx[-keep_last_turns]
+        changed = False
+        placeholder = str(self.config.get("code_strip_placeholder", "[code]"))
+        for i in range(cut):
+            msg = history[i]
+            content = msg.get("content")
+            if isinstance(content, str) and "```" in content:
+                new_content = self._CODE_BLOCK_RE.sub(placeholder, content)
+                if new_content != content:
+                    msg["content"] = new_content
+                    changed = True
+            elif isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        txt = item.get("text", "")
+                        if "```" in txt:
+                            new_txt = self._CODE_BLOCK_RE.sub(placeholder, txt)
+                            if new_txt != txt:
+                                item["text"] = new_txt
+                                changed = True
+        return history, changed
+
+    @staticmethod
+    def _strip_code_comments(code: str) -> str:
+        if not code or "\n" not in code:
+            return code
+        code = re.sub(r'"""[\s\S]*?"""', "", code)
+        code = re.sub(r"'''[\s\S]*?'''", "", code)
+        lines = [ln for ln in code.split("\n") if not ln.strip().startswith("#")]
+        result = "\n".join(lines)
+        result = re.sub(r"\n\s*\n+", "\n", result)
+        return result.strip("\n")
+
+    def strip_old_tool_comments(self, history: List[Dict[str, Any]],
+                                keep_last_turns: Optional[int] = None):
+        if keep_last_turns is None:
+            keep_last_turns = int(self.config.get("tool_comment_strip_after_turns", 0) or 0)
+        if keep_last_turns <= 0:
+            return history, False
+        user_idx = [i for i, m in enumerate(history) if m.get("role") == "user"]
+        if len(user_idx) <= keep_last_turns:
+            return history, False
+        cut = user_idx[-keep_last_turns]
+        changed = False
+        for i in range(cut):
+            msg = history[i]
+            if msg.get("role") != "assistant" or not msg.get("tool_calls"):
+                continue
+            for tc in msg["tool_calls"]:
+                func = tc.get("function", {})
+                args_raw = func.get("arguments", "{}")
+                try:
+                    args = json.loads(args_raw)
+                except Exception:
+                    continue
+                if not isinstance(args, dict):
+                    continue
+                modified = False
+                for key, val in list(args.items()):
+                    if isinstance(val, str) and "\n" in val \
+                            and ("#" in val or '"""' in val or "'''" in val):
+                        new_val = self._strip_code_comments(val)
+                        if new_val != val:
+                            args[key] = new_val
+                            modified = True
+                if modified:
+                    func["arguments"] = json.dumps(args, ensure_ascii=False)
+                    changed = True
+        return history, changed
+
     def _meta_char_budget(self, max_out_tokens: int) -> int:
         try:
             meta_ctx = int(self.config.get("meta_context_tokens",
@@ -1171,4 +1234,3 @@ class SessionManager:
                     or window[0])
             partials = new_partials
         return partials[0]
-

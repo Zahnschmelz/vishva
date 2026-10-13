@@ -18,10 +18,7 @@
   {
     "type": "function",
     "function": {
-      "name": "read_file",
-      "description": "Read file content.",
-      "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}
-    }
+      "name": "read_file", "description": "Read file content. Supports text files (txt, md, py, json, yaml, csv, etc.) AND PDF files (including scanned PDFs via OCR). Returns extracted text with page markers.", "parameters": {"type": "object", "properties": {"path": {"type": "string","description": "Path to the file (e.g. 'documents/report.pdf' or 'src/main.py')"}},"required": ["path"]}}
   },
   {
     "type": "function",

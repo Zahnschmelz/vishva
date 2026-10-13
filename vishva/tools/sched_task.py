@@ -1,17 +1,12 @@
 """Scheduler-Tools: sched_task, ls_tasks, cancel_task."""
-#import os
-#import re
 import json
-#import time
 from datetime import datetime
-#from typing import Any, Dict, List, Optional, Tuple
 from typing import Any, Dict, List, Optional
 
-#from ..paths import p, cfg_path
-
+VALID_TARGETS = {"telegram", "cli", "gui", "auto"}
+VALID_FALLBACKS = {"telegram", "cli", "gui", "auto", "none"}
 
 def _get_scheduler(self):
-    """TaskScheduler auflösen: direkter Ref → Agent-Ref → standalone lazy."""
     sched = getattr(self, "scheduler", None)
     if sched:
         return sched
@@ -25,16 +20,15 @@ def _get_scheduler(self):
         sched = TaskScheduler(self.config)
         self.scheduler = sched
         return sched
-    except Exception as e:
+    except Exception:
         return None
 
-
 def _sched_task(self, args: Dict[str, Any]) -> Dict[str, Any]:
-    """Schedule a task for later execution with multi-channel delivery."""
     trigger_time = (args.get("trigger_time") or "").strip()
     prompt = (args.get("prompt") or "").strip()
-    target = (args.get("target") or "").strip() or None
-    fallback_target = (args.get("fallback_target") or "").strip() or None
+    target = (args.get("target") or "").strip().lower() or None
+    fallback_target = (args.get("fallback_target") or "").strip().lower() or None
+    terminal = (args.get("terminal") or "").strip() or None
     chat_id = (args.get("chat_id") or "").strip() or None
 
     if not trigger_time:
@@ -42,7 +36,14 @@ def _sched_task(self, args: Dict[str, Any]) -> Dict[str, Any]:
     if not prompt:
         return {"error": "prompt is required."}
 
-    # target default based on current interface
+    if target and target not in VALID_TARGETS:
+        return {"error": f"Invalid target '{target}'. Allowed: {', '.join(sorted(VALID_TARGETS))}"}
+
+    if fallback_target and fallback_target not in VALID_FALLBACKS:
+        return {"error": f"Invalid fallback_target '{fallback_target}'. Allowed: {', '.join(sorted(VALID_FALLBACKS))}"}
+
+    if fallback_target == "none":
+        fallback_target = "none"
     if not target:
         agent = getattr(self, "agent_ref", None)
         interface = getattr(agent, "interface", "") or ""
@@ -55,29 +56,27 @@ def _sched_task(self, args: Dict[str, Any]) -> Dict[str, Any]:
 
     try:
         result = sched.add_task(
-            prompt=prompt,
+            chat_id=chat_id,
             trigger_time=trigger_time,
+            prompt=prompt,
             target=target or "auto",
             fallback_target=fallback_target,
-            chat_id=chat_id,
-        )
+            terminal=terminal,)
     except Exception as e:
         return {"error": f"Scheduler.add_task failed: {type(e).__name__}: {e}"}
 
     if not result or result.get("error"):
         return result or {"error": "add_task returned no result"}
+
     return {
         "success": True,
         "task_id": result.get("task_id"),
-        "trigger_time": result.get("trigger_time", trigger_time),
-        "target": result.get("target", target),
-        "prompt": prompt[:120],
-    }
-
+        "trigger_time": trigger_time,
+        "target": result.get("target", target or "auto"),
+        "fallback_target": fallback_target or "(default from config)",
+        "prompt": prompt[:120],}
 
 def _ls_tasks(self, args: Dict[str, Any]) -> Dict[str, Any]:
-    """List scheduled tasks from data/scheduled_tasks.json.
-    No session-id required; optional filters narrow the result set."""
     target = (args.get("target") or "").strip() or None
     status = (args.get("status") or "").strip() or None
     query = (args.get("query") or "").strip() or None
@@ -137,11 +136,11 @@ def _ls_tasks(self, args: Dict[str, Any]) -> Dict[str, Any]:
             "task_id": t.get("id") or t.get("task_id"),
             "trigger_time": t.get("trigger_time"),
             "target": t.get("target"),
+            "fallback_target": t.get("fallback_target") or "",
             "status": t_status,
             "prompt": (t.get("prompt") or "")[:120],
             "chat_id": t.get("chat_id"),
-            "created_at": t.get("created_at"),
-        })
+            "created_at": t.get("created_at"),})
 
     filtered.sort(key=lambda x: x.get("trigger_time") or "")
     filtered = filtered[:limit]
@@ -154,12 +153,10 @@ def _ls_tasks(self, args: Dict[str, Any]) -> Dict[str, Any]:
             "chat_id": chat_id, "due_before": due_before,
             "due_after": due_after, "include_done": include_done,
         }.items() if v},
-        "tasks": filtered,
-    }
+        "tasks": filtered,}
 
 
 def _cancel_task(self, args: Dict[str, Any]) -> Dict[str, Any]:
-    """Cancel a scheduled task by id."""
     task_id = (args.get("task_id") or "").strip()
     if not task_id:
         return {"error": "task_id is required."}
