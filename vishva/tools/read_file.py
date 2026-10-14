@@ -1,8 +1,8 @@
 """Auto-extrahiertes Tool-Modul (aus tool_manager.py)."""
 import os
-import tempfile
 import shutil
 import subprocess
+import tempfile
 from typing import Any, Dict
 
 
@@ -30,7 +30,6 @@ def _read_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
     total = len(lines)
     size = len(content.encode("utf-8"))
 
-    # ---------- Zeilenbereich (umgeht das Byte-Limit) ----------
     if range_requested:
         try:
             s = int(start_line)
@@ -49,7 +48,6 @@ def _read_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
         return {"success": True, "content": out,
                 "total_lines": total, "range": f"{s}-{e}", "size": size}
 
-    # ---------- Größen-Limit nur bei Voll-Reads ----------
     MAX_READ_BYTES = self.config.get("max_read_file_bytes", 1024)
     if size > MAX_READ_BYTES:
         head = "\n".join(lines[:100])
@@ -62,7 +60,6 @@ def _read_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
                         + tail),
             "truncated": True, "size": size, "total_lines": total}
 
-    # ---------- Voll-Read ----------
     if show_numbers:
         width = len(str(total))
         out = "\n".join(f"{i + 1:>{width}} | {ln}" for i, ln in enumerate(lines))
@@ -94,8 +91,7 @@ def _read_pdf(self, path: str) -> Dict[str, Any]:
                      path, ocr_output],
                     capture_output=True,
                     text=True,
-                    timeout=ocr_timeout
-                )
+                    timeout=ocr_timeout)
                 if result.returncode == 0 and os.path.exists(ocr_output):
                     processed_pdf = ocr_output
             except subprocess.TimeoutExpired:
@@ -125,8 +121,7 @@ def _read_pdf(self, path: str) -> Dict[str, Any]:
             "content": content,
             "pages": total_pages,
             "pages_read": pages_to_read,
-            "ocr_applied": processed_pdf != path
-        }
+            "ocr_applied": processed_pdf != path}
 
     except Exception as e:
         return {"error": f"PDF reading failed: {type(e).__name__}: {e}"}

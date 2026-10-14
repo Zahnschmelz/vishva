@@ -1,28 +1,27 @@
-import os
-from datetime import datetime
-#import sys
-import json
-import random
-import string
 import asyncio
-import subprocess
-import shutil
-import tempfile
-import re
-from typing import Dict
-from .paths import p, cfg_path
-#from .scheduler import TaskScheduler, prepare_agent_for_scheduled_task
-from .scheduler import TaskScheduler
+import html as html_mod
+import json
+import os
 import queue
+import random
+import re
+import shutil
+import string
+import subprocess
+import tempfile
 import threading
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, TypeHandler, ApplicationHandlerStop
-# from .agent import AgentCore, LANG_TO_EXT
+from datetime import datetime
+from typing import Dict
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (Application, ApplicationHandlerStop,
+                          CallbackQueryHandler, CommandHandler, ContextTypes,
+                          MessageHandler, TypeHandler, filters)
+
 from .agent import AgentCore
 from .code_manager import LANG_TO_EXT
-import html as html_mod
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import CallbackQueryHandler
+from .paths import cfg_path, p
+from .scheduler import TaskScheduler
 
 agents: Dict[str, AgentCore] = {}
 notification_queues: Dict[str, queue.Queue] = {}
@@ -33,14 +32,10 @@ except Exception:
     _bot_cfg = {}
 scheduler = TaskScheduler(config=_bot_cfg)
 
-import threading
-import asyncio
-
 _bot_loop: asyncio.AbstractEventLoop = None
 _bot_app = None
 _pending_confirms: Dict[str, Dict] = {}
 _confirm_lock = threading.Lock()
-
 
 def set_bot_runtime(loop, app):
     global _bot_loop, _bot_app
@@ -213,15 +208,11 @@ async def handle_confirm_reply(chat_id, text) -> bool:
             except Exception:
                 pass
         return True
-    else:
-        _finish_confirm(chat_id, {"allow": False,
-                                  "reason": text.strip() or "user denied"})
-        return True
+    _finish_confirm(chat_id, {"allow": False, "reason": text.strip() or "user denied"})
+    return True
 
-# --- Code-to-File (Telegram) ---
 _pending_code_saves: Dict[str, Dict] = {}
 _code_save_lock = threading.Lock()
-
 
 async def _send_codesave_prompt(chat_id, block, idx, total, state):
     if not _bot_app:
@@ -259,7 +250,6 @@ def _finish_codesave(chat_id: str, result):
 
 
 async def handle_codesave_callback(update: Update, context) -> bool:
-    """Verarbeitet die Code-Save Inline-Buttons."""
     query = update.callback_query
     data = query.data or ""
     if not data.startswith("codesave|"):
@@ -307,7 +297,7 @@ async def handle_codesave_callback(update: Update, context) -> bool:
             await query.edit_message_text("⏭️ Restliche Code-Blöcke übersprungen.")
         except Exception:
             pass
-    else:  # n
+    else:
         _finish_codesave(chat_id, {"save": False})
         try:
             await query.edit_message_text("🗑️ Speichern verworfen.")
@@ -317,7 +307,6 @@ async def handle_codesave_callback(update: Update, context) -> bool:
 
 
 async def handle_codesave_reply(chat_id: str, text: str) -> bool:
-    """Stage 2: Text-Antwort des Users = Custom-Dateiname."""
     chat_id = str(chat_id)
     with _code_save_lock:
         state = _pending_code_saves.get(chat_id)
@@ -328,7 +317,6 @@ async def handle_codesave_reply(chat_id: str, text: str) -> bool:
 
 
 def _make_code_save_handler(chat_id: str):
-    """Erzeugt den Code-Save-Handler für diesen Chat (läuft im Worker-Thread)."""
     chat_id = str(chat_id)
 
     def handler(block: Dict, idx: int, total: int):
@@ -376,7 +364,6 @@ def _format_table_as_pre(text: str) -> str:
         _replace, text)
 
 def markdown_to_html(text: str) -> str:
-    """Markdown → Telegram HTML. Code-Blöcke werden vor Formatierung geschützt."""
     if not text:
         return ""
 
@@ -392,9 +379,6 @@ def markdown_to_html(text: str) -> str:
             return key
         text = re.sub(pattern, _wrap, text, flags=re.DOTALL)
 
-    # 1) Fenced code blocks: Opening- UND Closing-Fence müssen eigene Zeilen sein.
-    #    Dadurch beenden innere ```-Sequenzen (z.B. text.replace('```', ''))
-    #    den Block NICHT mehr vorzeitig.
     _protect(
         r"(?ms)^[ \t]*```([\w+-]*)[ \t]*\r?\n(.*?)\n?[ \t]*```[ \t]*$",
         lambda m: (
@@ -405,7 +389,6 @@ def markdown_to_html(text: str) -> str:
                .replace(">", "&gt;"))
             + "</code></pre>"))
 
-    # 2) Unclosed fence (abgeschnittene Antwort) → Rest trotzdem als Code schützen
     m_open = re.search(r"(?m)^[ \t]*```([\w+-]*)[ \t]*\r?\n", text)
     if m_open:
         key = f"%%PH{counter[0]}%%"
@@ -419,7 +402,6 @@ def markdown_to_html(text: str) -> str:
             + "</code></pre>")
         text = text[:m_open.start()] + key
 
-    # 3) Inline code `...`
     _protect(
         r"`([^`\n]+)`",
         lambda m: (
@@ -430,10 +412,7 @@ def markdown_to_html(text: str) -> str:
                .replace(">", "&gt;"))
             + "</code>"))
 
-    # 4) Tabellen als <pre>
     text = _format_table_as_pre(text)
-
-    # 5) Markdown-Formatierung auf den Rest
     text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
     text = re.sub(r"__(.+?)__", r"<b>\1</b>", text)
     text = re.sub(r"(?<!\*)\*([^*\n]+?)\*(?!\*)", r"<i>\1</i>", text)
@@ -443,7 +422,6 @@ def markdown_to_html(text: str) -> str:
     text = re.sub(r"^#{1,3}\s+(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
     text = re.sub(r"^[-*_]{3,}\s*$", "", text, flags=re.MULTILINE)
 
-    # 6) Geschützte Blöcke zurück einsetzen
     for key, html in placeholders.items():
         text = text.replace(key, html)
 
@@ -536,7 +514,7 @@ async def cmd_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     mtime = 0
                     mtime_str = "unknown"
                 sessions_with_time.append((s, mtime, mtime_str))
-            sessions_with_time.sort(key=lambda x: x[1])  # oldest -> newest
+            sessions_with_time.sort(key=lambda x: x[1])
             current = agent.get_session_id()
             lines = []
             for s, _, ts in sessions_with_time:
@@ -598,7 +576,6 @@ async def cmd_ctx(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Invalid value. Integer expected.")
         return
 
-    # Nur in Config speichern + Agent direkt aktualisieren (kein Service-Restart)
     agent.config["context_tokens"] = ctx_value
     agent._save_config()
     agent.context_size = ctx_value
@@ -606,14 +583,14 @@ async def cmd_ctx(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"✅ Context size set: <code>{ctx_value}</code>\n"
-        f"💾 Saved to config.json and applied to this agent.",
+        "💾 Saved to config.json and applied to this agent.",
         parse_mode="HTML")
 
 async def cmd_listtools(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         toolpool_path = p("config", "toolpool.json")
-        with open(toolpool_path, "r", encoding="utf-8") as f:
-            pool = json.load(f)
+        with open(toolpool_path, "r", encoding="utf-8") as fh:
+            pool = json.load(fh)
         names = []
         for tool in pool:
             func = tool.get("function", {})
@@ -739,7 +716,7 @@ async def send_tts_voice(update: Update, agent: AgentCore, text: str):
                 "-b:a", "64k", "-application", "audio", tts_ogg,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE)
-            _, stderr = await conv.communicate()
+            #_, stderr = await conv.communicate()
             if conv.returncode == 0 and os.path.exists(tts_ogg):
                 with open(tts_ogg, "rb") as vf:
                     await update.message.reply_voice(voice=vf)
@@ -794,11 +771,11 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt_dir = tempfile.mkdtemp()
     formatted_cmd = stt_cmd.format(audio=wav_path, dir=txt_dir)
     try:
-        result = subprocess.run(formatted_cmd, shell=True, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(formatted_cmd, shell=True, capture_output=True, text=True, timeout=60, check=False)
         txt_file = os.path.join(txt_dir, os.path.basename(wav_path).replace(".wav", ".txt"))
         if os.path.exists(txt_file):
-            with open(txt_file, "r", encoding="utf-8") as f:
-                transcript = f.read().strip()
+            with open(txt_file, "r", encoding="utf-8") as fh:
+                transcript = fh.read().strip()
         else:
             transcript = result.stdout.strip()
     except Exception as e:
@@ -874,7 +851,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     agent = get_agent(chat_id)
     q = notification_queues.get(chat_id)
 
-    # Stage-2-Antworten ABFANGEN, bevor "Thinking..." gesendet wird:
     if await handle_codesave_reply(chat_id, text):
         return
     if await handle_confirm_reply(chat_id, text):
@@ -988,8 +964,8 @@ async def _send_response_with_images(update: Update, agent: AgentCore, response:
 
 def _tg_files_config():
     try:
-        with open(p("config", "config.json"), "r", encoding="utf-8") as f:
-            cfg = json.load(f)
+        with open(p("config", "config.json"), "r", encoding="utf-8") as fh:
+            cfg = json.load(fh)
     except Exception:
         cfg = {}
     normalized = {}
@@ -1096,13 +1072,9 @@ async def scheduled_task_loop(application: Application):
                             parse_mode="HTML")
                         scheduler.mark_done(task_id, delivered_via=f"telegram:{mode}")
                         print(f"⏰ Task {task_id} executed via Telegram ({mode}).")
-                    except asyncio.CancelledError:
-                        raise
                     except Exception as e:
                         print(f"⏰ Scheduler error task {task_id}: {e}")
                         scheduler.mark_failed(task_id, str(e))
-            except asyncio.CancelledError:
-                raise
             except Exception as e:
                 print(f"⏰ Scheduler loop error: {e}")
     except asyncio.CancelledError:
@@ -1332,8 +1304,8 @@ def main():
     if not os.path.exists(config_path):
         print(config_path, "not found!")
         return
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = json.load(f)
+    with open(config_path, "r", encoding="utf-8") as fh:
+        config = json.load(fh)
     token = config.get("bot_token", "")
     if not token or token == "YOUR_BOT_TOKEN_HERE":
         print("Please set bot_token in config.json!")

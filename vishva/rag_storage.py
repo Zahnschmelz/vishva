@@ -1,7 +1,7 @@
+import json
 import os
 import re
-import json
-from typing import List, Dict, Any
+from typing import Any, Dict, List
 
 try:
     import numpy as np

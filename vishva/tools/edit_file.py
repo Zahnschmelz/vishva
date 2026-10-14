@@ -27,7 +27,6 @@ def _edit_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
     new_content = None
     match_note = ""
 
-    # ---------- Modus A: Zeilenbereich ersetzen ----------
     if start_line is not None:
         try:
             start_line = int(start_line)
@@ -44,13 +43,11 @@ def _edit_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
         end_line = min(end_line, total)
         if new_string is None:
             return {"error": "new_string is required (use an empty string to delete the lines)."}
-        # leeres new_string = Zeilen löschen
         replacement = [] if new_string == "" else new_string.split("\n")
         new_lines = lines[:start_line - 1] + replacement + lines[end_line:]
         new_content = "\n".join(new_lines)
         match_note = f"line range {start_line}-{end_line} replaced"
 
-    # ---------- Modus B: old_string / new_string (wie bisher) ----------
     else:
         if old_string is None or new_string is None:
             return {

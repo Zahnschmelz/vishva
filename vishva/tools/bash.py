@@ -1,13 +1,10 @@
 """Auto-extrahiertes Tool-Modul (aus tool_manager.py)."""
 import os
 import re
-#import json
-#import time
 import shlex
-#import shutil
 import subprocess
-#from typing import Any, Dict, List, Optional, Tuple
 from typing import Any, Dict, List, Tuple
+
 try:
     import requests
 except ImportError:
@@ -59,8 +56,6 @@ def _bash(self, args: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": "Timeout after 120 seconds."}
     except Exception as e:
         return {"error": str(e)}
-
-
 
 def _validate_bash_command(self, command: str) -> Tuple[bool, List[str]]:
     warnings = []

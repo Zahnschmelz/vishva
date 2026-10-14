@@ -1,13 +1,8 @@
 """Auto-extrahiertes Tool-Modul (aus tool_manager.py)."""
-import os
-#import re
 import json
-#import time
-#import shutil
-#import subprocess
-#from typing import Any, Dict, List, Optional, Tuple
+import os
 from typing import Any, Dict, List
-#from ..paths import p, cfg_path, BASE_DIR
+
 from ..paths import p
 
 
@@ -22,7 +17,6 @@ def _read_cache(self, args: Dict[str, Any]) -> Dict[str, Any]:
     if not (abs_path.startswith(base + os.sep) and abs_path.endswith(".json")):
         return {"error": "Invalid path. Only data/agent_cache/*.json allowed."}
 
-    # ---------- Chunk-Modus (hat Vorrang vor search) ----------
     if chunk is not None:
         try:
             chunk = int(chunk)
@@ -68,7 +62,6 @@ def _read_cache(self, args: Dict[str, Any]) -> Dict[str, Any]:
     result_text = content.get("result", "")
     n_chunks = content.get("chunks", 0) or 0
 
-    # ---------- Keyword-Suche ----------
     if search:
         keywords = [kw.lower() for kw in search.split() if kw.strip()]
         if not keywords:
@@ -76,7 +69,6 @@ def _read_cache(self, args: Dict[str, Any]) -> Dict[str, Any]:
 
         def _excerpt(text: str, kws: List[str],
                      max_lines: int = 12, ctx: int = 1):
-            """Returns (hit_count, excerpt_of_matching_lines_with_context)."""
             lines = text.splitlines()
             hit = {i for i, ln in enumerate(lines)
                    if any(kw in ln.lower() for kw in kws)}
@@ -92,7 +84,6 @@ def _read_cache(self, args: Dict[str, Any]) -> Dict[str, Any]:
                 ordered = ordered[:half] + ordered[-half:]
             return len(hit), "\n".join(lines[i] for i in ordered)[:1500]
 
-        # Ohne Chunks: Volltext durchsuchen → bei Treffer kompletter Inhalt
         if not n_chunks:
             if any(kw in result_text.lower() for kw in keywords):
                 return {"success": True, "found": 1, "search": search,
@@ -101,7 +92,6 @@ def _read_cache(self, args: Dict[str, Any]) -> Dict[str, Any]:
             return {"success": True, "found": 0, "search": search,
                     "message": f"No matches for '{search}' in this cache entry."}
 
-        # Mit Chunks: nur relevante Chunks zurückgeben
         stem = abs_path[:-len(".json")]
         matches = []
         n = 0
@@ -133,7 +123,6 @@ def _read_cache(self, args: Dict[str, Any]) -> Dict[str, Any]:
                 "chunks_scanned": n,
                 "matches": matches[:10]}
 
-    # ---------- Normaler Lese-Modus ----------
     if n_chunks:
         return {
             "success": True,

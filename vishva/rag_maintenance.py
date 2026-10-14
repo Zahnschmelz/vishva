@@ -1,11 +1,10 @@
-import os
-import json
-import time
-import shutil
 import fcntl
-#import hashlib
+import json
+import os
+import shutil
+import time
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import psutil
@@ -40,7 +39,6 @@ QUICK_ALIASES = {
     "sonstiges": "miscellaneous",
     "other": "miscellaneous",
     "auto": "miscellaneous",}
-
 
 class RagMaintainer:
 

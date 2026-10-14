@@ -1,19 +1,16 @@
-import os
+import datetime
 import json
-import uuid
-import time
+import os
 import shutil
 import subprocess
-import datetime
-#from typing import Dict, Any, Optional, List
-from typing import Dict, Any, Optional
+import time
+import uuid
+from typing import Any, Dict, Optional
+
 from .paths import p
 
 
 class BackgroundTaskManager:
-    """Führt Hintergrund-Tasks als transiente systemd-User-Services aus.
-    Command/Status/Logs werden in data/bg_tasks/ persistiert, damit
-    Restart und Neustart-Erkennung möglich sind."""
 
     def __init__(self, config: dict):
         self.config = config or {}
@@ -25,14 +22,12 @@ class BackgroundTaskManager:
         self.initial_delay = float(self.config.get("bg_task_initial_delay", 4))
         self.log_tail_lines = int(self.config.get("bg_task_log_tail_lines", 15))
 
-    # ---------- Pfade ----------
     def _meta_path(self, tid):   return os.path.join(self.base_dir, f"{tid}.json")
     def _exit_path(self, tid):   return os.path.join(self.base_dir, f"{tid}.exit")
     def _script_path(self, tid): return os.path.join(self.scripts_dir, f"{tid}.sh")
     def _log_path(self, tid):    return os.path.join(self.logs_dir, f"{tid}.log")
     def _unit_name(self, tid):   return f"vishva-bg-{tid}"
 
-    # ---------- Meta ----------
     def _load_meta(self, tid) -> Dict[str, Any]:
         path = self._meta_path(tid)
         if os.path.exists(path):
@@ -55,7 +50,6 @@ class BackgroundTaskManager:
             except Exception:
                 pass
 
-    # ---------- systemd-Helfer ----------
     def _systemd_available(self) -> bool:
         return shutil.which("systemd-run") is not None
 
@@ -83,7 +77,6 @@ class BackgroundTaskManager:
         except Exception:
             return ""
 
-    # ---------- Status ----------
     def _query_status(self, tid) -> Dict[str, Any]:
         meta = self._load_meta(tid)
         unit = meta.get("unit", self._unit_name(tid))
@@ -125,7 +118,6 @@ class BackgroundTaskManager:
             return {"status": active, "detail": sub}
         return {"status": active or "unknown", "detail": sub}
 
-    # ---------- Aktionen ----------
     def start(self, command: str, description: str = "",
               restart_on_failure: bool = False, task_id: Optional[str] = None) -> Dict[str, Any]:
         if not command or not command.strip():
@@ -141,7 +133,6 @@ class BackgroundTaskManager:
         workdir = os.path.abspath(self.config.get("agent_workdir", "working_dir"))
         os.makedirs(workdir, exist_ok=True)
 
-        # Launcher-Skript schreiben (vermeidet Quoting-Probleme)
         script = (
             "#!/usr/bin/env bash\n"
             f"cd \"{workdir}\" || exit 1\n"
@@ -174,7 +165,6 @@ class BackgroundTaskManager:
             "status": "running", "log_file": log_path}
         self._save_meta(tid, meta)
 
-        # 3–5 s warten, dann Status melden
         time.sleep(self.initial_delay)
         info = self._query_status(tid)
         meta["status"] = info.get("status", "unknown")
@@ -245,7 +235,6 @@ class BackgroundTaskManager:
             task_id=task_id)
 
     def clean(self) -> Dict[str, Any]:
-        """Entfernt alle abgeschlossenen/fehlgeschlagenen Tasks (läuft nicht mehr)."""
         removed = 0
         for fname in list(os.listdir(self.base_dir)):
             if not fname.endswith(".json"):

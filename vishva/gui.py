@@ -1,36 +1,39 @@
-import re
-import os
-import sys
+import datetime
 import html
 import json
+import os
 import queue
+import re
 import shutil
-import datetime
+import subprocess
+import sys
 import tempfile
 import threading
-import subprocess
-#from .paths import p, cfg_path
+
+from PySide6.QtCore import Qt, QTimer, Signal, Slot
+
 from .paths import p
-from PySide6.QtCore import QTimer, Signal, Slot, Qt
 from .scheduler import TaskScheduler, process_due_tasks
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from PySide6.QtWidgets import (
-        QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
-        QTextBrowser, QPlainTextEdit, QPushButton, QTabWidget, QLineEdit,
-        QTableWidget, QTableWidgetItem, QHeaderView, QSpinBox, QDoubleSpinBox,
-        QCheckBox, QComboBox, QMessageBox, QScrollArea, QAbstractItemView, QInputDialog,
-        QLabel)
     from PySide6.QtCore import Qt, QThread, Signal
-    from PySide6.QtGui import QTextCursor, QIcon, QColor
+    from PySide6.QtGui import QColor, QIcon, QTextCursor
+    from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
+                                   QComboBox, QDoubleSpinBox, QFormLayout,
+                                   QHBoxLayout, QHeaderView, QInputDialog,
+                                   QLabel, QLineEdit, QMainWindow, QMessageBox,
+                                   QPlainTextEdit, QPushButton, QScrollArea,
+                                   QSpinBox, QTableWidget, QTableWidgetItem,
+                                   QTabWidget, QTextBrowser, QVBoxLayout,
+                                   QWidget)
 except ImportError:
     print("PySide6 fehlt. Installiere: pip install PySide6")
     sys.exit(1)
 from .agent import AgentCore
+
 try:
-    # from .agent import _play_notification_sound
     from .cli import _play_notification_sound
 except Exception:
     _play_notification_sound = None
@@ -125,7 +128,6 @@ class MainWindow(QMainWindow):
         self._confirm_event = threading.Event()
         self._confirm_result = None
         self._confirm_signal.connect(self._show_confirm_dialog, Qt.QueuedConnection)
-        # nach Agent-Erzeugung:
         self.agent.tool_manager.set_confirm_handler(self._confirm_tool_gui)
 
     def _scheduler_tick(self):
@@ -348,7 +350,6 @@ class MainWindow(QMainWindow):
                 pass
 
     def _confirm_tool_gui(self, tool_name: str, preview: str):
-        # läuft im Worker-Thread → Dialog in GUI-Thread marshalen + warten
         self._pause_spinner()
         self._confirm_event.clear()
         self._confirm_result = None
@@ -361,7 +362,6 @@ class MainWindow(QMainWindow):
 
     @Slot(str, str)
     def _show_confirm_dialog(self, tool_name: str, preview: str):
-        # läuft im GUI-Thread
         msg = QMessageBox(self)
         msg.setWindowTitle(f"Tool-Bestätigung: {tool_name}")
         msg.setText(f"Tool '{tool_name}' ausführen?")
@@ -868,7 +868,6 @@ class MainWindow(QMainWindow):
         self._update_tokens()
 
     def _init_tts_manager(self, enabled: bool = True, quiet: bool = False) -> bool:
-        """Initialisiert den TTSManager zur Laufzeit, falls nötig."""
         if getattr(self.agent, "tts_manager", None) is not None:
             try:
                 self.agent.tts_manager.enabled = bool(enabled)
@@ -880,7 +879,7 @@ class MainWindow(QMainWindow):
 
         try:
             from .tts_manager import TTSManager
-            self.agent.tts_manager = TTSManager()
+            self.agent.tts_manager = TTSManager(self.agent.config)
             self.agent.tts_manager.enabled = bool(enabled)
             self.agent.config["tts_enabled"] = bool(enabled)
             if hasattr(self.agent.tool_manager, "tts_manager"):
@@ -1498,7 +1497,6 @@ class MainWindow(QMainWindow):
                 out = []
                 for r in res.get("results", []):
                     score = float(r.get("score", 0.0))
-                    # Voller Eintrag (enthält priority/maintained) statt Such-Duplikat
                     entry = None
                     if hasattr(rag, "_entry_by_id"):
                         entry = rag._entry_by_id.get(str(r.get("id", "")))

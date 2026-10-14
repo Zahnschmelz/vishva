@@ -1,11 +1,6 @@
 """Auto-extrahiertes Tool-Modul (aus tool_manager.py)."""
-import os
-#import re
 import json
-#import time
-#import shutil
-#import subprocess
-#from typing import Any, Dict, List, Optional, Tuple
+import os
 from typing import Any, Dict
 
 try:
@@ -30,7 +25,6 @@ def _write_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
     if not skip_validation and lang in ("python", "json", "bash"):
         lint_result = self._lint_content(path, content, lang)
         if not lint_result["valid"]:
-            # File TROTZDEM schreiben — Agent kann via edit_file korrigieren
             backup_path = self._backup_file(path) if os.path.isfile(path) else None
             try:
                 with open(path, "w", encoding="utf-8") as f:

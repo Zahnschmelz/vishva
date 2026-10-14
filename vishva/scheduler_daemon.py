@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-import os
-import sys
 import json
-import time
-import shutil
+import os
 import shlex
+import shutil
 import subprocess
-import tempfile
-import threading
+import sys
+import time
 from datetime import datetime
-from typing import Optional, List, Dict, Any
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from .paths import p, cfg_path, BASE_DIR
-from .scheduler import TaskScheduler, process_due_tasks, send_telegram_message
+from typing import List, Optional
+
 from .agent import AgentCore
+from .paths import cfg_path, p
 from .rag_maintenance import RagMaintainer
+from .scheduler import TaskScheduler, process_due_tasks, send_telegram_message
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 TMP_DIR = os.path.join(PROJECT_DIR, "tmp")
@@ -265,38 +265,27 @@ def open_terminal_with_file(
     title: str = "Vishva Scheduler",
     terminal_hint: str = ""):
     if terminal_hint == "telegram":
-        print("[DEBUG] Hint=telegram → Do not open the terminal")
         return False
-    project_dir = os.path.dirname(os.path.abspath(__file__))
     abs_filepath = os.path.abspath(filepath)
-    print(f"[DEBUG] wait for file: {abs_filepath}")
     timeout = 300
     interval = 5
     elapsed = 0
     while not os.path.exists(abs_filepath) and elapsed < timeout:
         time.sleep(interval)
         elapsed += interval
-        print(f"[DEBUG] ... {elapsed}s waited, file not available")
     if not os.path.exists(abs_filepath):
-        print(f"[DEBUG] ❌ File after {timeout}s NOT found: {abs_filepath}")
         return False
-    print(f"[DEBUG] ✅ File not found after {elapsed}s: {abs_filepath}")
     terminal = None
     if terminal_hint:
         terminal = shutil.which(terminal_hint)
-        if terminal:
-            print(f"[DEBUG] Terminal from task: {terminal}")
     if not terminal:
         terminal = get_default_terminal()
-        print(f"[DEBUG] Terminal-Default: {terminal}")
     if not terminal:
-        print("[DEBUG] Schritt 2: ❌ kein Terminal-Emulator gefunden")
         return False
     base = os.path.basename(abs_filepath)
     task_tag = base.replace(".txt", "")
     script_name = f".{task_tag}.sh"
     script_path = os.path.join(p("tmp"), script_name)
-    rel_script = f"./tmp/{script_name}"
     script_content = f"""#!/bin/bash
 trap 'rm -f "$0"' EXIT HUP INT TERM
 cat "{abs_filepath}"
@@ -308,25 +297,13 @@ read -n1 -s
     try:
         with open(script_path, "w", encoding="utf-8") as f:
             f.write(script_content)
-        print(f"[DEBUG] ✅ script created: {script_path}")
     except Exception as e:
         print(f"[DEBUG] ❌ error while creating: {e}")
         return False
     try:
         os.chmod(script_path, 0o755)
-        print(f"[DEBUG] ✅ chmod +x: {script_path}")
     except Exception as e:
         print(f"[DEBUG] ❌ chmod-Fehler: {e}")
-        return False
-
-    cmd = _build_terminal_cmd(terminal, title, rel_script)
-    print(f"[DEBUG] start Terminal: {cmd}")
-    try:
-        proc = subprocess.Popen(cmd, start_new_session=True, cwd=BASE_DIR)
-        print(f"[DEBUG] ✅ Terminal started (PID {proc.pid})")
-        return True
-    except Exception as e:
-        print(f"[DEBUG] ❌ Error: {e}")
         return False
 
 def main():
@@ -346,28 +323,17 @@ def main():
     print(f"   Daemon-Targets: {', '.join(scheduler.daemon_targets)}")
 
     try:
-        # Dedizierte session_id, damit der Daemon NICHT die neueste
-        # User-Session lädt/berührt. Da "scheduler_daemon.json" nicht
-        # existiert, legt create_session() eine frische, isolierte
-        # Session mit zufälliger ID an.
         agent = AgentCore(
             session_id="scheduler_daemon",
-            enable_tts=False,
-        )
-
+            enable_tts=False,)
         agent.tool_manager.scheduler = scheduler
         agent.interface = "daemon"
-
-        # RAG-Maintenance
         rag_maintainer = None
         if agent.rag_manager and bool(config.get("rag_maintenance_enabled", True)):
             rag_maintainer = RagMaintainer(
                 rag_manager=agent.rag_manager,
                 config=config,
                 daemon_ref=None,
-                # WICHTIG: die Daemon-eigene Session im Idle-Gate ignorieren,
-                # sonst blockiert die gerade angelegte Session-Datei
-                # (mtime = jetzt) die Wartung für immer.
                 ignore_session_id=agent.get_session_id())
             print(f"[Daemon] RAG-Maintenance initialisiert "
                   f"(ignore_session={agent.get_session_id()}).")
@@ -383,9 +349,6 @@ def main():
     except Exception as e:
         print(f"[Daemon] Session-Cleanup-Fehler: {e}")
 
-    # Embedding-Modell vorwärmen, damit der erste Maintenance-Tick
-    # es nicht erst laden muss. (Wird von rag_preload_model bereits
-    # als Thread angestoßen; der Lock verhindert Doppel-Laden.)
     try:
         if getattr(agent, "rag_manager", None):
             agent.rag_manager._embed("vishva scheduler warmup")
@@ -463,7 +426,7 @@ def main():
                     f"Prompt: {prompt}\n\n"
                     f"{response_str}")
                 send_telegram_message(full_text, bot_token, chat_id)
-                print(f"[Terminal] Hint=telegram → full answer via Telegram")
+                print("[Terminal] Hint=telegram → full answer via Telegram")
             else:
                 print("[Terminal] Hint=telegram, but no TG-Credentials")
         elif (
@@ -508,7 +471,6 @@ def main():
                         print(f"[Daemon] Session-Cleanup: {res['removed']} leere Sessions entfernt")
                 except Exception:
                     pass
-            # RAG-Maintenance Tick
             if rag_maintainer:
                 try:
                     rag_maintainer.tick()

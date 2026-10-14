@@ -1,25 +1,26 @@
-import os
-import time
-import json
-import queue
-import shutil
 import asyncio
 import datetime
+import json
+import os
+import queue
+import shutil
+import tempfile
 import subprocess
-from rich.panel import Panel
+import time
+from typing import Any, Dict
+
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.styles import Style
 from rich.console import Console, Group
 from rich.live import Live
-from rich.layout import Layout
-from rich.text import Text
 from rich.markup import escape
-from prompt_toolkit.styles import Style
-from prompt_toolkit import PromptSession
-from prompt_toolkit.formatted_text import HTML
-from typing import Dict, Any
-from prompt_toolkit.completion import Completer, Completion
+from rich.panel import Panel
+from rich.text import Text
 
-from .paths import p
 from .agent import AgentCore
+from .paths import p
 from .scheduler import TaskScheduler, process_due_tasks
 
 console = Console()
@@ -69,15 +70,10 @@ class ChatInterface:
         self.stream_lines = int(self.agent.config.get("stream_thinking_lines", 5))
 
     def _on_chunk(self, delta: Dict[str, Any]):
-        """Callback vom Agent: schreibt Chunks in die Queue."""
         self._stream_queue.put(delta)
 
     def _stream_display(self):
-        from rich.console import Group
-        from rich.live import Live
-        from rich.panel import Panel
         from rich.spinner import Spinner
-        from rich.text import Text
         stream_lines = int(self.agent.config.get("stream_thinking_lines", 5))
         reasoning_buf = []
         content_buf = []
@@ -108,7 +104,7 @@ class ChatInterface:
                 dtype = delta.get("type")
                 if dtype == "done":
                     if finished:
-                        continue          # zweites done ignorieren
+                        continue
                     finished = True
                     break
                 elif dtype == "tool_log":
@@ -181,9 +177,6 @@ class ChatInterface:
         #os.system('clear' if os.name != 'nt' else 'cls')#
         ##################################################
         console.print(Panel("[bold green]Vishva Chat[/bold green]\n" "Type /help for commands.", border_style="green"))
-        scheduler_task = None
-        if self.scheduler.enabled:
-            scheduler_task = asyncio.create_task(self._scheduler_loop())
         console.print(f"[dim]Session: {self.agent.get_session_id()}[/dim]")
         if self.agent.startup_tokens >= 0:
             console.print(f"[dim]📊 Session Tokens: {self.agent.startup_tokens}[/dim]")
@@ -216,7 +209,7 @@ class ChatInterface:
                 if cmd == '/bye':
                     console.print("[bold yellow]bye 👋🏻[/bold yellow]")
                     break
-                elif cmd == '/new':
+                if cmd == '/new':
                     self.agent.start_new_session()
                     console.print(f"[bold green]✨ new session started: {self.agent.get_session_id()}[/bold green]")
                     try:
@@ -343,16 +336,16 @@ class ChatInterface:
                         status = "AN" if self.agent.tts_manager.enabled else "AUS"
                         console.print(f"[bold yellow]🔊 Voice Status: {status}[/bold yellow]")
                         if status == "AN":
-                            self._set_status(f"🔊", 2)
+                            self._set_status("🔊", 2)
                         elif status == "AUS":
-                            self._set_status(f"🔇", 2)
+                            self._set_status("🔇", 2)
                     elif arg in ("on", "off"):
                         self.agent.tts_manager.toggle(arg == "on")
                         status = "AN" if self.agent.tts_manager.enabled else "AUS"
                         if status == "AN":
-                            self._set_status(f"🔊", 2)
+                            self._set_status("🔊", 2)
                         elif status == "AUS":
-                            self._set_status(f"🔇", 2)
+                            self._set_status("🔇", 2)
                     else:
                         console.print("[bold red]❌ Usage: /voice [on|off][/bold red]")
                 elif cmd == '/info':
@@ -421,9 +414,9 @@ Aktiv Tools: {', '.join(active) if active else 'Keine'}
                         status = "AN" if self.agent.sound_enabled else "AUS"
                         console.print(f"[bold yellow]🔔 Sound: {status}[/bold yellow]")
                         if status == "AN":
-                            self._set_status(f"🔔", 2)
+                            self._set_status("🔔", 2)
                         elif status == "AUS":
-                            self._set_status(f"🔕", 2)
+                            self._set_status("🔕", 2)
                     elif arg in ("on", "off"):
                         self.agent.sound_enabled = (arg == "on")
                         self.agent.config["sound_enabled"] = self.agent.sound_enabled
@@ -431,9 +424,9 @@ Aktiv Tools: {', '.join(active) if active else 'Keine'}
                         status = "AN" if self.agent.sound_enabled else "AUS"
                         console.print(f"[bold yellow] Sound: {status}[/bold yellow]")
                         if status == "AN":
-                            self._set_status(f"🔔", 2)
+                            self._set_status("🔔", 2)
                         elif status == "AUS":
-                            self._set_status(f"🔕", 2)
+                            self._set_status("🔕", 2)
                     else:
                         console.print("[bold red]❌ Usage: /sound [on|off][/bold red]")
                 elif cmd == '/showThinking':
@@ -487,9 +480,6 @@ Aktiv Tools: {', '.join(active) if active else 'Keine'}
                             console.print(
                                 f"[bold red]❌ Image not found or invalid: {img_path}[/bold red]")
                 elif cmd == '/stt':
-                    import tempfile
-                    import shutil
-#                    import signal
                     recorder = None
                     if shutil.which("arecord"):
                         recorder = "arecord"
@@ -500,7 +490,7 @@ Aktiv Tools: {', '.join(active) if active else 'Keine'}
                         continue
                     tmp_dir = tempfile.mkdtemp()
                     tmp_wav = os.path.join(tmp_dir, "recording.wav")
-                    console.print(f"[bold cyan]🎙️ Recording in progress... Press ENTER to stop.[/bold cyan]")
+                    console.print("[bold cyan]🎙️ Recording in progress... Press ENTER to stop.[/bold cyan]")
                     if recorder == "arecord":
                         proc = subprocess.Popen(
                             ["arecord", "-f", "cd", tmp_wav],
@@ -536,7 +526,7 @@ Aktiv Tools: {', '.join(active) if active else 'Keine'}
                     formatted_cmd = stt_cmd.format(audio=tmp_wav, dir=txt_dir)
                     transcript = ""
                     try:
-                        result = subprocess.run(formatted_cmd, shell=True, capture_output=True, text=True, timeout=60)
+                        result = subprocess.run(formatted_cmd, shell=True, capture_output=True, text=True, timeout=60, check=False)
                         txt_file = os.path.join(txt_dir, os.path.basename(tmp_wav).replace(".wav", ".txt"))
                         if os.path.exists(txt_file):
                             with open(txt_file, "r", encoding="utf-8") as f:
@@ -689,14 +679,11 @@ Aktiv Tools: {', '.join(active) if active else 'Keine'}
             response = None
             enable_stream = bool(self.agent.config.get("enable_stream", False))
             if enable_stream:
-                # NEU: Queue leeren, damit alte done-Signale vom
-                # vorherigen Turn das neue Display nicht sofort beenden
                 while not self._stream_queue.empty():
                     try:
                         self._stream_queue.get_nowait()
                     except queue.Empty:
                         break
-                # --- Streaming: Live-Display parallel zum Chat im Thread ---
                 stream_task = asyncio.create_task(
                     asyncio.to_thread(self._stream_display))
                 try:
@@ -707,7 +694,6 @@ Aktiv Tools: {', '.join(active) if active else 'Keine'}
                     self._stream_queue.put({"type": "done"})
                     await stream_task
             else:
-                # --- Non-Streaming (wie bisher) ---
                 with console.status("[bold cyan]💭Thinking…[/bold cyan]", spinner="dots") as status:
                     self._active_status = status
                     self.agent._active_status = status
@@ -736,7 +722,6 @@ Aktiv Tools: {', '.join(active) if active else 'Keine'}
             except OSError:
                 width = 50
             console.print("-" * width)
-
 
 async def main():
     interface = ChatInterface()

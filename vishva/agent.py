@@ -1,34 +1,29 @@
-import os
-import io
-import re
-import sys
-import copy
-import time
-import json
-import string
-import shutil
-import base64
-import random
 import asyncio
-import requests
+import base64
+import copy
 import datetime
-import threading
+import io
+import json
+import os
+import random
+import re
 import subprocess
-from rich.panel import Panel
-from rich.markup import escape
-from .paths import p, cfg_path
+import sys
+import threading
+import time
+from typing import Any, Dict, List, Optional
+
+import requests
 from rich.console import Console
 from rich.markdown import Markdown
-from .tool_manager import ToolManager
-from prompt_toolkit.styles import Style
-from prompt_toolkit import PromptSession
+from rich.markup import escape
+from rich.panel import Panel
+
+from .code_manager import CODE_BLOCK_RE, CodeManager
+from .paths import p
 from .session_manager import SessionManager
-from prompt_toolkit.formatted_text import HTML
-from .tts_manager import TTSManager as TTSManager
-from .code_manager import CodeManager, CODE_BLOCK_RE
-from typing import Dict, List, Any, Optional
-from .scheduler import TaskScheduler, process_due_tasks
-from prompt_toolkit.completion import Completer, Completion
+from .tool_manager import ToolManager
+from .tts_manager import TTSManager
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
@@ -68,7 +63,7 @@ class AgentCore:
         self.code_manager = CodeManager(
             self.config,
             debug_level_fn=self._debug_level,
-            log_fn=lambda msg: console.print(msg))
+            log_fn=console.print)
         self.code_manager.set_handler(self._cli_code_save_handler)
         self.rag_manager = None
         if self.config.get("rag_enabled", False):
@@ -85,7 +80,7 @@ class AgentCore:
                     try:
                         if delay > 0:
                             time.sleep(delay)
-                        result = self.rag_manager.preload_embedding_model()
+                        self.rag_manager.preload_embedding_model()
                     except Exception:
                         pass
                 threading.Thread(target=_rag_warmup, daemon=True).start()
@@ -242,8 +237,8 @@ class AgentCore:
     def _build_code_fix_prompt(self, failed: List[Dict[str, Any]]) -> str:
         return self.code_manager.build_fix_prompt(failed)
 
-    def _condense_trace_meta(self, trace: str, task: str = "rescue"):
-        return SessionManager.condense_trace_meta(trace)
+    def _condense_trace_meta(self, trace: str, task: str = "rescue") -> Optional[str]:
+        return self.session_manager.condense_trace_meta(trace, task=task)
 
     @staticmethod
     def _repair_args_string(s) -> str:
@@ -343,7 +338,6 @@ class AgentCore:
                 console.print(f"[dim red]RAG-PostExtract-Fehler: {e}[/dim red]")
 
     def _enrichment_progress(self, text: str):
-        """Leitet Enrichment-Zwischenantworten an den Streaming-Callback weiter."""
         if getattr(self, "_chunk_callback", None):
             try:
                 self._chunk_callback({"type": "enrichment", "content": text})
@@ -443,7 +437,7 @@ class AgentCore:
             try:
                 result = subprocess.run(
                     ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"],
-                    capture_output=True, text=True, timeout=2)
+                    capture_output=True, text=True, timeout=2, check=False)
                 if result.returncode == 0:
                     parts = result.stdout.strip().split(",")
                     if len(parts) >= 3:
@@ -504,7 +498,7 @@ class AgentCore:
             from PIL import Image
             max_size = self.config.get("image_max_size", 256)
             img = Image.open(path)
-            img.thumbnail((max_size, max_size), Image.LANCZOS)
+            img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
             if img.mode in ("RGBA", "P"):
                 img = img.convert("RGB")
             buf = io.BytesIO()
@@ -642,8 +636,6 @@ class AgentCore:
                          base_url: Optional[str] = None,
                          model: Optional[str] = None,
                          api_key: Optional[str] = None) -> Dict[str, Any]:
-        """Streaming-Variante von _call_api. Liefert Daten im gleichen Format,
-        damit der Rest von _chat_impl unverändert weiterläuft."""
         base_url = (base_url or self.base_url).rstrip("/")
         model = model or self.model
         api_key = api_key or self.api_key
@@ -737,11 +729,10 @@ class AgentCore:
     def chat(self, user_message: str, image_b64: Optional[str] = None) -> str:
         with self._chat_lock:
             response = self._chat_impl(user_message, image_b64)
-        # NEU: Live-Display beenden, damit Code-Save input() nutzen kann
         if getattr(self, "_chunk_callback", None):
             try:
                 self._chunk_callback({"type": "done"})
-                time.sleep(0.5)   # kurz warten, bis Live-Display wirklich zu ist
+                time.sleep(0.5)
             except Exception:
                 pass
         if not getattr(self, "_code_fix_active", False):
@@ -924,13 +915,12 @@ class AgentCore:
                     history, rescue_log = self._rescue_context(history, rescue_attempts)
                     console.print(f"[dim yellow]🆘 {rescue_log}[/dim yellow]")
                     continue
-                else:
-                    trace = self._extract_tool_trace(history)
-                    warn = ("⚠️ Context almost full – task aborted (tool results too large)."
-                            "Please divide the task into smaller portions.\n[PROGRESS]\n" + trace)
-                    history.append({"role": "assistant", "content": warn})
-                    self.session_manager.save_session(self.session_id, history)
-                    return warn
+                trace = self._extract_tool_trace(history)
+                warn = ("⚠️ Context almost full – task aborted (tool results too large)."
+                        "Please divide the task into smaller portions.\n[PROGRESS]\n" + trace)
+                history.append({"role": "assistant", "content": warn})
+                self.session_manager.save_session(self.session_id, history)
+                return warn
             tool_turns += 1
             api_messages = self._inject_budget(api_messages, tool_turns, max_tool_turns, tokens_now)
             api_messages = self._inject_tool_budget(api_messages, tool_turns, max_tool_turns)
@@ -1098,7 +1088,6 @@ class AgentCore:
                     display = self._strip_thinking(content)
                     self._print_answer(display)
                     console.print()
-            memory_tools_used = False
             round_max_res = self.config.get("max_tool_result_chars", 1000)
             if self.config.get("loop_adaptive_cap", True) and tokens_now and tokens_now > int(self.context_size * 0.6):
                 round_max_res = max(1200, round_max_res // 2)
@@ -1302,7 +1291,7 @@ class AgentCore:
             "Merge these partial progress reports of ONE ongoing task into a "
             "single concise progress report (max. 150 words). Include: goal, "
             "completed steps, open issues, next step.\nPARTIALS:\n" + merged)
-        data = self._call_meta_api([{"role": "user", "content": prompt}], max_tokens=max_out)
+        data = self._call_meta_api([{"role": "user", "content": prompt}], max_tokens=max_out, task=task)
         if data:
             content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
             if content and content.strip():

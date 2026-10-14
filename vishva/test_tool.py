@@ -8,14 +8,14 @@ Usage:
   python -m vishva.test_tool info <tool>
   python -m vishva.test_tool call <tool> '<json-args>'
 """
-import sys
-import json
 import argparse
+import json
+import sys
 
 from rich.console import Console
-from rich.table import Table
 from rich.panel import Panel
 from rich.syntax import Syntax
+from rich.table import Table
 
 from .paths import p
 from .tool_manager import ToolManager

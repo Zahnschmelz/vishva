@@ -1,7 +1,9 @@
+import json
 import os
 import sys
-import json
+
 import requests
+
 
 def send_file_to_telegram(file_path):
     base_dir = os.path.expanduser("~/ai/vishva")

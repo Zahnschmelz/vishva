@@ -1,11 +1,8 @@
 """Auto-extrahiertes Tool-Modul (aus tool_manager.py)."""
+import json
 import os
 import re
-import json
 import time
-#import shutil
-#import subprocess
-#from typing import Any, Dict, List, Optional, Tuple
 from typing import Any, Dict, Optional
 
 try:
@@ -40,8 +37,8 @@ def _web_read(self, args: Dict[str, Any]) -> Dict[str, Any]:
 
     if use_js:
         try:
-            from playwright.sync_api import sync_playwright
             from playwright.sync_api import TimeoutError as PlaywrightTimeout
+            from playwright.sync_api import sync_playwright
             try:
                 from playwright_stealth import stealth_sync
                 has_stealth = True
@@ -375,8 +372,8 @@ def _web_read_static(self, url: str, max_chars: int, timeout: int) -> Dict[str, 
 def _web_read_amazon_product(self, url: str, max_chars: int, timeout_ms: int,
                               take_screenshot: bool, use_stealth: bool) -> Dict[str, Any]:
     try:
-        from playwright.sync_api import sync_playwright
         from playwright.sync_api import TimeoutError as PlaywrightTimeout
+        from playwright.sync_api import sync_playwright
         try:
             from playwright_stealth import stealth_sync
             has_stealth = True
@@ -505,13 +502,11 @@ def _web_read_amazon_product(self, url: str, max_chars: int, timeout_ms: int,
     except Exception as e:
         return {"error": f"Playwright error: {type(e).__name__}: {e}"}
 
-
-
 def _extract_content_from_html(
     self, html: str, url: str, title: str, max_chars: int, screenshot_path: str) -> Dict[str, Any]:
     try:
-        from readability import Document
         from markdownify import markdownify as md
+        from readability import Document
     except ImportError:
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(html, "html.parser")
@@ -547,4 +542,3 @@ def _extract_content_from_html(
     if screenshot_path:
         result["screenshot"] = screenshot_path
     return result
-

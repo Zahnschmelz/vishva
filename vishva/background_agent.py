@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 import json
-#import time
-#import threading
-#from datetime import datetime
-from rich.console import Console
-#from typing import Any, Dict, List, Optional, Set
 from typing import Any, Dict, List, Optional
+
+from rich.console import Console
 
 try:
     import requests
@@ -66,7 +63,6 @@ class MetaModelClient:
              max_tokens: int = 50, temperature: float = 0.1) -> Optional[str]:
         if requests is None:
             return None
-        # Config-Override für Reasoning-Modelle, die mehr Tokens brauchen
         try:
             cfg_max = int(self.config.get("meta_model_max_tokens", 0) or 0)
             if cfg_max > max_tokens:

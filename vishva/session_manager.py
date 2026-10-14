@@ -1,13 +1,15 @@
+import datetime
+import json
 import os
 import re
-import json
-import uuid
 import time
-import datetime
+import uuid
+from typing import Any, Dict, List, Optional, Set
+
 import requests
-#from .paths import p, cfg_path
+
 from .paths import p
-from typing import Dict, List, Any, Optional, Set
+
 try:
     import tiktoken
     TIKTOKEN_AVAILABLE = True
@@ -15,9 +17,9 @@ except ImportError:
     TIKTOKEN_AVAILABLE = False
 
 class SessionManager:
-    meta_call_fn = None
     def __init__(self, config_path: str = None):
         self.config_path = config_path or p("config", "config.json")
+        self.meta_call_fn = None
         self.config = self._load_config()
         self.keep_n = self.config.get("history_keep_n", 5)
         self.tool_ttl_turns = self.config.get("tool_ttl_turns", 4)
@@ -148,7 +150,6 @@ class SessionManager:
         return {"removed": len(removed), "sessions": removed}
 
     def cleanup_orphan_seeds(self):
-        """Löscht Seed-Files deren Session nicht mehr existiert."""
         seed_dir = p("data", "seeds")
         session_dir = p("data", "sessions")
         if not os.path.isdir(seed_dir):
@@ -156,7 +157,7 @@ class SessionManager:
         for fname in os.listdir(seed_dir):
             if fname == "fixed.seed":
                 continue
-            sid = fname.rsplit(".", 1)[0]  # "abc123.seed" → "abc123"
+            sid = fname.rsplit(".", 1)[0]
             session_file = os.path.join(session_dir, f"{sid}.json")
             if not os.path.exists(session_file):
                 try:
@@ -602,20 +603,20 @@ class SessionManager:
             return partials[0]
 
         while len(partials) > 1:
-            merged = "\n".join(f"- {p}" for p in partials)
+            merged = "\n".join(f"- {pfx}" for pfx in partials)
             if len(merged) <= budget:
                 return meta_call(merged, sys_text=merge_text) or partials[0]
             new_partials: List[str] = []
             window: List[str] = []
             size = 0
-            for p in partials:
-                cost = len(p) + 3
+            for pfx in partials:
+                cost = len(pfx) + 3
                 if size + cost > budget and window:
                     m = meta_call("\n".join(f"- {x}" for x in window),
                                   sys_text=merge_text)
                     new_partials.append(m or window[0])
                     window, size = [], 0
-                window.append(p)
+                window.append(pfx)
                 size += cost
             if window:
                 m = meta_call("\n".join(f"- {x}" for x in window),
@@ -705,7 +706,6 @@ class SessionManager:
         referenced = set()
         pointer_re = re.compile(r"\[POINTER:([^\]]+)\]")
         for msg in history:
-            # Pointer in JEDEM String-Content suchen (auch assistant-Summarys)
             content = msg.get("content", "")
             if isinstance(content, str):
                 for m in pointer_re.finditer(content):
@@ -778,7 +778,7 @@ class SessionManager:
             turn_msgs = history[start:end]
             turns_back = (len(turn_indices) - 1) - turn_idx - 1
             if turns_back >= self.tool_ttl_turns:
-                turn_msgs = self._compress_turn_tool_pairs(turn_msgs, session_id)   # ← session_id
+                turn_msgs = self._compress_turn_tool_pairs(turn_msgs, session_id)
             new_history.extend(turn_msgs)
         return new_history
 
@@ -827,7 +827,6 @@ class SessionManager:
                             if "error" in content.lower():
                                 status = "error"
 
-                    # NEU: Arguments + Result in den Agent-Cache offloaden
                     if session_id and tc_id != "unknown":
                         entry = self._load_cache_entry(session_id, tc_id) or {}
                         entry.update({
@@ -863,8 +862,8 @@ class SessionManager:
     def compress_history_pointers(self, session_id: str, history: List[Dict[str, Any]],
                                    offload: bool = True, skip_last_tool_results: int = 0) -> List[Dict[str, Any]]:
 
-        MAX_RESULT = self.config.get("max_tool_result_chars", 500)
-        MAX_ARGS = self.config.get("max_tool_args_chars", 500)
+        max_result = self.config.get("max_tool_result_chars", 500)
+        max_args = self.config.get("max_tool_args_chars", 500)
 
         tool_result_indices = [i for i, msg in enumerate(history) if msg.get("role") == "tool"]
 
@@ -887,7 +886,7 @@ class SessionManager:
                     name = func.get("name", "")
                     arguments = func.get("arguments", "")
 
-                    if len(arguments) > MAX_ARGS and offload:
+                    if len(arguments) > max_args and offload:
                         entry = self._load_cache_entry(session_id, tc_id)
                         if not entry:
                             entry = {}
@@ -933,8 +932,8 @@ class SessionManager:
 
                 should_truncate = idx in truncate_indices
 
-                if should_truncate and len(result) > MAX_RESULT:
-                    short = result[:MAX_RESULT]
+                if should_truncate and len(result) > max_result:
+                    short = result[:max_result]
                     if offload:
                         short += f"\n[... truncated, use read_cache with path={self._cache_file(session_id, tc_id)} for full output]"
                     new_history.append({
@@ -978,12 +977,10 @@ class SessionManager:
         def _is_marker(m):
             return (m.get("role") == "user"
                     and "SESSION_CONTINUED:" in str(m.get("content", "")))
-        existing = [m for m in history if _is_marker(m)]
         cleaned = [msg for msg in history if not _is_marker(msg)]
         cleaned.append({"role": "user", "content": marker_text})
         self.save_session(session_id, cleaned)
         verify = self.load_session(session_id)
-        verify_markers = [m for m in verify if _is_marker(m)]
 
     @staticmethod
     def repair_args_string(s) -> str:
@@ -1217,15 +1214,15 @@ class SessionManager:
                 return self.merge_partials(merged, max_out, task=task) or partials[0]
             new_partials = []
             window, size = [], 0
-            for p in partials:
-                cost = len(p) + 3
+            for part in partials:
+                cost = len(part) + 3
                 if size + cost > budget and window:
                     new_partials.append(
                         self.merge_partials(
                             "\n".join(f"- {x}" for x in window), max_out, task=task)
                         or window[0])
                     window, size = [], 0
-                window.append(p)
+                window.append(part)
                 size += cost
             if window:
                 new_partials.append(

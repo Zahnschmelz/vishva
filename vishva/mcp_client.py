@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""
-mcp_client.py — minimaler synchroner MCP-Client für Vishva.
-Supports stdio servers (subprocess) and Streamable-HTTP servers.
-No extra deps besides requests (HTTP only).
-"""
 import json
 import os
 import re
@@ -11,6 +6,7 @@ import shutil
 import subprocess
 import threading
 from typing import Any, Dict, List, Optional
+
 from .paths import BASE_DIR
 
 try:
@@ -22,7 +18,6 @@ PROTOCOL_VERSION = "2025-03-26"
 CLIENT_INFO = {"name": "vishva", "version": "1.0"}
 
 def load_mcp_servers(config: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """Merge mcp_servers (config.json) + config/mcp.json (Standard-Format)."""
     servers = dict(config.get("mcp_servers", {}) or {})
     path = os.path.join(BASE_DIR, "config", "mcp.json")
     if os.path.exists(path):
@@ -38,13 +33,10 @@ def load_mcp_servers(config: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
 class MCPError(Exception):
     pass
 
-
 def _sanitize(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "_", name)
 
-
 class StdioConnection:
-    """JSON-RPC über stdin/stdout eines Subprozesses."""
 
     def __init__(self, name: str, cfg: Dict[str, Any], timeout: int):
         self.name = name
@@ -61,7 +53,6 @@ class StdioConnection:
         cmd = self.cfg.get("command", "")
         if not cmd:
             raise MCPError(f"{self.name}: 'command' fehlt")
-        # which() nur für nackte Befehle; Pfade (mit /) lässt Popen über cwd lösen
         if os.sep not in cmd and not shutil.which(cmd):
             raise MCPError(f"{self.name}: command '{cmd}' not found in PATH")
         env = os.environ.copy()
@@ -142,7 +133,6 @@ class StdioConnection:
 
 
 class HttpConnection:
-    """Streamable HTTP (POST JSON-RPC, optional SSE-Responses)."""
 
     def __init__(self, name: str, cfg: Dict[str, Any], timeout: int):
         if requests is None:
@@ -227,7 +217,6 @@ class HttpConnection:
 
 
 class MCPManager:
-    """Verwaltet konfigurierte MCP-Server und exponiert deren Tools."""
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config or {}

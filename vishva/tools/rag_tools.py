@@ -1,11 +1,5 @@
 """Auto-extrahiertes Tool-Modul (aus tool_manager.py)."""
 import os
-#import re
-#import json
-#import time
-#import shutil
-#import subprocess
-#from typing import Any, Dict, List, Optional, Tuple
 from typing import Any, Dict
 
 try:
@@ -14,17 +8,14 @@ except ImportError:
     requests = None
 
 def _rag_mgr(self):
-    """RAGManager auflösen: direktes Attribut → agent_ref → lazy erzeugen."""
     mgr = getattr(self, "rag_manager", None)
     if mgr:
         return mgr
-    # Fallback 1: der Agent hängt am ToolManager (agent_ref)
     agent = getattr(self, "agent_ref", None)
     mgr = getattr(agent, "rag_manager", None) if agent else None
     if mgr:
-        self.rag_manager = mgr          # cachen, damit alle Tools dieselbe Instanz nutzen
+        self.rag_manager = mgr
         return mgr
-    # Fallback 2: standalone (test_tool.sh) → eigene Instanz erzeugen
     if not bool(self.config.get("rag_enabled", True)):
         return None
     try:

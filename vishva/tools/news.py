@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-import sys
 import json
 import os
 import re
+import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)

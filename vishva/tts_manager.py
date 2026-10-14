@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 import os
 import tempfile
-import requests
 from typing import Optional
+
+import requests
+
 
 class TTSManager:
     def __init__(self, config: dict):
         self.config = config
         self.enabled = bool(config.get("tts_enabled", False))
-## Properties
     @property
     def server_url(self) -> str:
         return str(
@@ -45,7 +46,6 @@ class TTSManager:
     def play_locally(self) -> bool:
         return bool(self.config.get("tts_play", False))
 
-# Kern-Funktionen
     def synthesize(self, text: str) -> Optional[bytes]:
         if not text or not text.strip():
             return None

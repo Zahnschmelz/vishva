@@ -1,6 +1,7 @@
 import os
 import sys
 
+
 def _detect_base() -> str:
     env = os.environ.get("VISHVA_HOME", "").strip()
     if env:

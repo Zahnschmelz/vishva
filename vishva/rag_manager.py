@@ -1,11 +1,12 @@
-import os
-#import re
+import hashlib
 import json
 import math
-import hashlib
+import os
 import threading
-from typing import List, Dict, Any, Optional
-from .paths import p, cfg_path
+from typing import Any, Dict, List, Optional
+
+from .paths import cfg_path, p
+
 try:
     import numpy as np
 except ImportError:
@@ -52,7 +53,7 @@ class RAGManager:
         self._rag_arrays = {}
         self._entry_by_id = {}
         model_cfg = str(self.config.get("rag_embedding_model", "st") or "st")
-        self._embedder_tag = model_cfg.rstrip("/").split("/")[-1] or "st"
+        self._embedder_tag = model_cfg.rstrip("/").rsplit("/", maxsplit=1)[-1] or "st"
         self._meta = None
         self._load()
         if self.enabled and bool(self.config.get("rag_index_startup", True)):
@@ -62,17 +63,13 @@ class RAGManager:
                 pass
 
     def _get_meta(self, config: dict):
-        # Cache-Key aus URL+Model, damit unterschiedliche Routings separate Clients bekommen
         url = str(config.get("meta_model_url", "") or "")
         model = str(config.get("meta_model_name", "") or "")
         cache_key = f"{url}|{model}"
-
-        # Alte Struktur-Migration: self._meta kann noch ein einzelner Client sein
         if not hasattr(self, "_meta_clients"):
             old = getattr(self, "_meta", None)
             self._meta_clients = {}
             if old is not None:
-                # Heuristik: altes Modell unter einem Default-Key ablegen
                 self._meta_clients["_legacy"] = old
 
         client = self._meta_clients.get(cache_key)
@@ -257,7 +254,7 @@ class RAGManager:
             _set_offline()
             return project_path
         local_base = cfg_path(self.config, "rag_local_model_dir", "models")
-        folder_name = model_name.split("/")[-1] if "/" in model_name else model_name
+        folder_name = model_name.rsplit("/", maxsplit=1)[-1] if "/" in model_name else model_name
         local_dir = os.path.join(local_base, folder_name)
         if _is_valid_model_dir(local_dir):
             _set_offline()
@@ -383,7 +380,8 @@ class RAGManager:
                 if self._model is None:
                     with self._model_lock:
                         if self._model is None:
-                            from sentence_transformers import SentenceTransformer
+                            from sentence_transformers import \
+                                SentenceTransformer
                             model_name = self._resolve_embedding_model()
                             try:
                                 import torch
@@ -848,11 +846,11 @@ class RAGManager:
             used += len(line)
             injected_count += 1
         if debug_injection:
-            print(f"\n[RAG-DEBUG] ══════════════════════════════════════════")
+            print("\n[RAG-DEBUG] ══════════════════════════════════════════")
             print(f"[RAG-DEBUG] Essential-Injektion: {injected_count} Einträge")
             for line in lines[1:]:
                 print(f"[RAG-DEBUG]   ★ {line[:80]}")
-            print(f"[RAG-DEBUG] ══════════════════════════════════════════\n")
+            print("[RAG-DEBUG] ══════════════════════════════════════════\n")
         expand_n = int(self.config.get("rag_knowledge_expand_neighbors", 1))
         inject_max = int(self.config.get("rag_inject_max_chars", 2500))
         if expand_n > 0 and len(lines) > 1:
@@ -860,7 +858,6 @@ class RAGManager:
             for line in list(lines[1:]):
                 if total_chars >= inject_max:
                     break
-                # Finde den Eintrag für diese Zeile
                 for entry in self.entries:
                     if entry.get("category") == "knowledge" and str(entry.get("text", ""))[:40] in line:
                         meta = entry.get("metadata", {})
@@ -926,8 +923,8 @@ class RAGManager:
         if cat in [str(c) for c in protected_categories]:
             return True
         for prefix in protected_sources:
-            p = str(prefix)
-            if p and src.startswith(p):
+            pre = str(prefix)
+            if pre and src.startswith(pre):
                 return True
         return False
 
@@ -1234,21 +1231,15 @@ class RAGManager:
             if debug_rag:
                 print("[RAG-ENRICH] No relevant info found by meta model")
             return ""
-        #else:
-        #    print("💉")
         return response3.strip()
 
     def extract_from_turn(self, user_message: str, assistant_answer: str, config: dict, prev_user_msg: str = "", prev_asst_msg: str = ""):
         if not self.enabled:
-            return
+            return 0
         debug_rag = bool(config.get("rag_debug_injection", False))
-        try:
-            from .background_agent import MetaModelClient
-        except ImportError:
-            return
         meta = self._get_meta(config)
         if not meta.available:
-            return
+            return 0
         context_parts = []
         try:
             res = self.query_no_track(user_message, top_k=5, min_score=0.3)
@@ -1265,27 +1256,27 @@ class RAGManager:
         context_parts.append(f"[CURRENT TURN — ASSISTANT]: {assistant_answer[:300]}")
         full_context = "\n".join(context_parts)
         extraction_prompt = (
-            f"Analyze this conversation for NEW knowledge worth saving permanently.\n\n"
+            "Analyze this conversation for NEW knowledge worth saving permanently.\n\n"
             f"{full_context}\n\n"
-            f"SPEAKER ATTRIBUTION — decide WHO each fact is about:\n"
-            f"- Lines labeled '... USER' are spoken BY THE USER.\n"
-            f"- Lines labeled '... ASSISTANT' are spoken BY THE ASSISTANT.\n"
-            f"- A fact belongs to user_info/preference/system ONLY if it describes the USER.\n"
-            f"- When the ASSISTANT talks about ITSELF (its name, capabilities, what IT can do, "
-            f"rules it follows), that is 'agent' knowledge — NEVER attribute it to the user.\n"
-            f"- If the user ASKS about the assistant (e.g. 'Was kannst du?'), the answer "
-            f"describes the ASSISTANT → category 'agent', not user_info.\n"
-            f"- The user merely ASKING a question is not a fact about the user.\n\n"
-            f"Extract factual, reusable knowledge that is NEW (not already stored).\n\n"
-            f"CATEGORIES and their PRIORITY RANGES:\n"
-            f"- user_info (priority 2-3): Identity, name, job, skills the USER has, relationships, pets, facts about the user\n"
-            f"- preference (priority 2-3): The USER's likes/dislikes, communication style, habits, routines, tools/languages the USER uses\n"
-            f"- system (priority 2-3): The USER's hardware, OS, paths, services, devices, network\n"
-            f"- agent (priority 2-3): The ASSISTANT's identity, capabilities, behavioral rules, instructions, taboos\n"
-            f"- knowhow (priority 1-2): General knowledge, how-tos, references, documentation facts\n"
-            f"- project (priority 0-1): Current project facts (temporary, subject to rotation)\n"
-            f"- miscellaneous (priority 0-3): Fallback for anything unclear\n\n"
-            f"Examples:\n"
+            "SPEAKER ATTRIBUTION — decide WHO each fact is about:\n"
+            "- Lines labeled '... USER' are spoken BY THE USER.\n"
+            "- Lines labeled '... ASSISTANT' are spoken BY THE ASSISTANT.\n"
+            "- A fact belongs to user_info/preference/system ONLY if it describes the USER.\n"
+            "- When the ASSISTANT talks about ITSELF (its name, capabilities, what IT can do, "
+            "rules it follows), that is 'agent' knowledge — NEVER attribute it to the user.\n"
+            "- If the user ASKS about the assistant (e.g. 'Was kannst du?'), the answer "
+            "describes the ASSISTANT → category 'agent', not user_info.\n"
+            "- The user merely ASKING a question is not a fact about the user.\n\n"
+            "Extract factual, reusable knowledge that is NEW (not already stored).\n\n"
+            "CATEGORIES and their PRIORITY RANGES:\n"
+            "- user_info (priority 2-3): Identity, name, job, skills the USER has, relationships, pets, facts about the user\n"
+            "- preference (priority 2-3): The USER's likes/dislikes, communication style, habits, routines, tools/languages the USER uses\n"
+            "- system (priority 2-3): The USER's hardware, OS, paths, services, devices, network\n"
+            "- agent (priority 2-3): The ASSISTANT's identity, capabilities, behavioral rules, instructions, taboos\n"
+            "- knowhow (priority 1-2): General knowledge, how-tos, references, documentation facts\n"
+            "- project (priority 0-1): Current project facts (temporary, subject to rotation)\n"
+            "- miscellaneous (priority 0-3): Fallback for anything unclear\n\n"
+            "Examples:\n"
             f'- User: "Ich heiße Alex" → {{"text": "Der User heißt Alex", "category": "user_info", "priority": 3}}\n'
             f'- User: "Ich programmiere in Python und nutze FastAPI" → {{"text": "User programmiert in Python, nutzt FastAPI", "category": "preference", "priority": 2}}\n'
             f'- User: "Mein Rechner hat 64GB RAM und eine RTX 4090" → {{"text": "System: 64GB RAM, RTX 4090 GPU", "category": "system", "priority": 2}}\n'
@@ -1293,17 +1284,17 @@ class RAGManager:
             f'- Assistant: "Ich kann Python, Bash und Go programmieren" → {{"text": "Agent kann Python, Bash, Go programmieren", "category": "agent", "priority": 2}}  (NOT user_info!)\n'
             f'- Assistant: "Ich bin Vishva, deine Assistentin" → {{"text": "Die Assistentin heißt Vishva", "category": "agent", "priority": 3}}\n'
             f'- User: "Man installiert X mit pip install y" → {{"text": "How-to: X installieren via pip install y", "category": "knowhow", "priority": 2}}\n\n'
-            f"Do NOT extract:\n"
-            f"- Greetings, smalltalk, questions without concrete answers\n"
-            f"- Information the Assistant just retrieved from existing knowledge\n"
-            f"- Temporary context that won't be relevant later\n"
-            f"- The assistant's capabilities/skills AS IF they were the user's (those are 'agent', not 'user_info')\n\n"
-            f"Rules:\n"
-            f"- Each entry must be self-contained and name its subject explicitly ('Der User …' or 'Der Agent …')\n"
-            f"- Use the priority range specified for each category\n"
-            f"- Use ONLY the categories listed above\n\n"
-            f"If nothing worth saving, answer: NO_EXTRACT\n"
-            f"Otherwise answer with JSON array:\n"
+            "Do NOT extract:\n"
+            "- Greetings, smalltalk, questions without concrete answers\n"
+            "- Information the Assistant just retrieved from existing knowledge\n"
+            "- Temporary context that won't be relevant later\n"
+            "- The assistant's capabilities/skills AS IF they were the user's (those are 'agent', not 'user_info')\n\n"
+            "Rules:\n"
+            "- Each entry must be self-contained and name its subject explicitly ('Der User …' or 'Der Agent …')\n"
+            "- Use the priority range specified for each category\n"
+            "- Use ONLY the categories listed above\n\n"
+            "If nothing worth saving, answer: NO_EXTRACT\n"
+            "Otherwise answer with JSON array:\n"
             f'[{{"text": "...", "category": "...", "priority": 0}}]')
         response = meta.chat(extraction_prompt, max_tokens=300, temperature=0.1)
         if debug_rag:
@@ -1311,19 +1302,19 @@ class RAGManager:
                   f"user={user_message[:50]} | asst={assistant_answer[:50]}")
             print(f"[RAG-EXTRACT] Meta response: {response[:100] if response else 'None'}")
         if not response or "NO_EXTRACT" in response.upper():
-            return
+            return 0
         try:
             json_start = response.find("[")
             json_end = response.rfind("]") + 1
             if json_start == -1 or json_end == 0:
-                return
+                return 0
             entries = json.loads(response[json_start:json_end])
             if not isinstance(entries, list):
-                return
+                return 0
         except (json.JSONDecodeError, ValueError):
             if debug_rag:
                 print("[RAG-EXTRACT] Could not parse JSON response")
-            return
+            return 0
         if not entries:
             return
         max_n = int(self.config.get("rag_meta_max_extraction_entries", 3) or 3)
@@ -1372,6 +1363,7 @@ class RAGManager:
             self._save_meta()
         except Exception:
             pass
+        return saved
 
     def is_duplicate(self, text: str, meta=None, debug: bool = False) -> bool:
         dedup_threshold = float(self.config.get("rag_dedup_similarity_threshold", 0.90))
@@ -1392,8 +1384,7 @@ class RAGManager:
             return False
         if meta is None:
             try:
-                from .background_agent import MetaModelClient
-                meta = self._get_meta(config)
+                meta = self._get_meta(self.config)
                 if meta is None:
                     return False
             except ImportError:

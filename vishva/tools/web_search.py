@@ -1,18 +1,10 @@
 """Auto-extrahiertes Tool-Modul (aus tool_manager.py)."""
-#import os
-#import re
-#import json
-#import time
-#import shutil
-#import subprocess
-#from typing import Any, Dict, List, Optional, Tuple
 from typing import Any, Dict
 
 try:
     import requests
 except ImportError:
     requests = None
-
 
 def _web_search(self, args: Dict[str, Any]) -> Dict[str, Any]:
     query = args.get("query", "")
@@ -45,4 +37,3 @@ def _web_search(self, args: Dict[str, Any]) -> Dict[str, Any]:
             "results": formatted}
     except Exception as e:
         return {"error": f"Search failed: {type(e).__name__}: {str(e)}"}
-

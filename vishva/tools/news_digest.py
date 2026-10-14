@@ -1,14 +1,11 @@
 """Auto-extrahiertes Tool-Modul (aus tool_manager.py)."""
-import os
-#import re
-import sys
 import json
-#import time
-#import shutil
-#import subprocess
-#from typing import Any, Dict, List, Optional, Tuple
+import os
+import sys
+import subprocess
 from typing import Any, Dict, List
-from ..paths import p, cfg_path, BASE_DIR
+
+from ..paths import BASE_DIR, cfg_path, p
 
 try:
     import requests

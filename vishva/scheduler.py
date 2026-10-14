@@ -1,11 +1,13 @@
-import os
 import json
-import uuid
+import os
 import re
 import shutil
 import threading
+import uuid
+import subprocess
 from datetime import datetime
-from typing import Dict, List, Any, Optional, Callable
+from typing import Any, Callable, Dict, List, Optional
+
 from .paths import p
 
 VALID_TARGETS = {"telegram", "cli", "gui", "auto"}
@@ -114,7 +116,6 @@ class TaskScheduler:
         self._lock = threading.RLock()
         self._load()
 
-# Basics
     @staticmethod
     def _load_config(path: str) -> Dict[str, Any]:
         if not path or not os.path.exists(path):

@@ -1,13 +1,12 @@
-"""Code-to-File: extrahiert Code-Blöcke aus Antworten, speichert sie,
-validiert Syntax und liefert Auto-Fix-Prompts. Frontend-unabhängig."""
-import os
-import re
 import json
+import os
 import random
-import string
+import re
 import shutil
+import string
 import subprocess
-from typing import Dict, List, Any, Optional
+from typing import Any, Dict, List, Optional
+
 from .paths import cfg_path
 
 CODE_BLOCK_RE = re.compile(
@@ -34,7 +33,6 @@ class CodeManager:
                  debug_level_fn=None, log_fn=None):
         self.config = config or {}
         self.save_handler = save_handler
-        # Optionale Callbacks für Debug-Ausgaben (kommen vom Agent)
         self._debug_level_fn = debug_level_fn or (lambda: 0)
         self._log_fn = log_fn or (lambda msg: None)
 
@@ -45,23 +43,19 @@ class CodeManager:
             return 0
 
     def set_handler(self, fn):
-        """Frontend-Handler: fn(block, idx, total) -> {'save', 'filename', 'skip_all'}"""
         self.save_handler = fn
 
-    # ---------- Extraktion ----------
     def extract_code_blocks(self, text: str) -> List[Dict[str, str]]:
         return [{"lang": (m.group(1) or "text").lower().strip(),
                  "code": m.group(2)}
                 for m in CODE_BLOCK_RE.finditer(text)]
 
-    # ---------- Filename ----------
     def default_code_filename(self, blocks: List[Dict]) -> str:
         lang = blocks[0]["lang"] if blocks else "text"
         ext = LANG_TO_EXT.get(lang, ".txt")
         rand_str = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
         return f"snippet_{rand_str}{ext}"
 
-    # ---------- Speichern ----------
     def save_code_to_file(self, blocks: List[Dict], filename: str) -> Optional[str]:
         code_dir = cfg_path(self.config, "code_to_file_dir", "data/code_snippets")
         os.makedirs(code_dir, exist_ok=True)
@@ -96,7 +90,6 @@ class CodeManager:
                 self._log_fn(f"[CodeSave] Write failed: {e}")
             return None
 
-    # ---------- Orchestrator ----------
     def maybe_save(self, response: str) -> List[Dict[str, Any]]:
         if not bool(self.config.get("code_to_file_enabled", False)):
             return []
@@ -135,7 +128,6 @@ class CodeManager:
                 saved.append(entry)
         return saved
 
-    # ---------- Validierung ----------
     def validate_code_file(self, path: str) -> Dict[str, Any]:
         ext = os.path.splitext(path)[1].lower()
         try:
@@ -200,7 +192,6 @@ class CodeManager:
                 return {"checked": False, "ok": True, "error": None}
         return {"checked": False, "ok": True, "error": None}
 
-    # ---------- Auto-Fix-Prompt ----------
     def build_fix_prompt(self, failed: List[Dict[str, Any]]) -> str:
         parts = []
         for entry in failed:

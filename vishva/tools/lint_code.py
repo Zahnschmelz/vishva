@@ -1,13 +1,9 @@
 """Auto-extrahiertes Tool-Modul (aus tool_manager.py)."""
-import os
-#import re
 import ast
 import json
-#import time
-#import shutil
-import tempfile
+import os
 import subprocess
-#from typing import Any, Dict, List, Optional, Tuple
+import tempfile
 from typing import Any, Dict, List
 
 try:
